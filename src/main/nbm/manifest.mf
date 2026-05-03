@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+OpenIDE-Module-Layer: io/ziumper/godot/layer.xml
+OpenIDE-Module-Localizing-Bundle: io/ziumper/godot/Bundle.properties
+
