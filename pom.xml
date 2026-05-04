@@ -104,7 +104,7 @@
         <dependency>
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-netbeans-modules-options-api</artifactId>
-            <version>RELEASE290</version>
+            <version>RELEASE280</version>
         </dependency>
     </dependencies>
     <properties>
