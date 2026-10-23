@@ -31,7 +31,7 @@ import org.netbeans.modules.lsp.client.spi.LanguageServerProvider;
  *
  * @author ziumper
  */
-@MimeRegistration(mimeType="text/x-gdscript", service=LanguageServerProvider.class)
+@MimeRegistration(mimeType="text/gdscript", service=LanguageServerProvider.class)
 public class GdscriptClient implements LanguageServerProvider {                                                                         
                                                                                                                                                                                    
                                                                                                                                           
@@ -40,6 +40,7 @@ public class GdscriptClient implements LanguageServerProvider {
         ServerRestarter restarter = lkp.lookup(ServerRestarter.class);
         int port = 6005; // or read from prefs
 
+        System.out.println("[GODOT MODULE] startServer() called, port " + port + " open: " + isPortOpen("127.0.0.1", port));
         // 1. Godot must be reachable — otherwise return null (no server)
         if (!isPortOpen("127.0.0.1", port)) {
             System.out.println("[GODOT MODULE] Port is not open");
@@ -51,14 +52,23 @@ public class GdscriptClient implements LanguageServerProvider {
         boolean isWindows = System.getProperty("os.name").toLowerCase().contains("win");
         List<String> cmd = isWindows
             ? List.of("cmd.exe", "/c", "npx", "godot-lsp-stdio-bridge", "--godot-port", String.valueOf(port))
-            : List.of("npx", "godot-lsp-stdio-bridge", "--godot-port", String.valueOf(port));
+            : List.of("npx", "godot-lsp-stdio-bridge");
 
-        
-        
-       
         try {
             System.out.println("[GODOT MODULE] Starting gdscript bridge");
-            Process p = new ProcessBuilder(cmd).start();
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            
+            
+//            pb.directory(new java.io.File(""));
+
+            pb.environment().put("GODOT_LSP_PORT", String.valueOf(port));
+//            pb.environment().put("GODOT_LSP_BRIDGE_DEBUG", "true");
+            pb.environment().put(
+                "GODOT_LSP_BRIDGE_LOG",
+                "/tmp/godot-lsp-stdio-bridge.log"
+            );
+
+            Process p = pb.start();
             return LanguageServerDescription.create(
                     p.getInputStream(),
                     p.getOutputStream(),

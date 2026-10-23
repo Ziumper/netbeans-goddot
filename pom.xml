@@ -12,6 +12,11 @@
                 <artifactId>nbm-maven-plugin</artifactId>
                 <version>14.5</version>
                 <extensions>true</extensions>
+                 <configuration>
+                    <additionalArguments>
+                        -J-Dorg.netbeans.modules.lsp.client.logging.level=FINE
+                    </additionalArguments>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -104,6 +109,17 @@
         <dependency>
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-netbeans-modules-editor-mimelookup</artifactId>
+            <version>RELEASE280</version>
+        </dependency>
+            <dependency>
+            <groupId>org.netbeans.api</groupId>
+            <artifactId>org-netbeans-modules-projectapi</artifactId>
+            <version>RELEASE90</version>
+                <type>jar</type>
+            </dependency>
+        <dependency>
+            <groupId>org.netbeans.api</groupId>
+            <artifactId>org-netbeans-modules-projectuiapi</artifactId>
             <version>RELEASE280</version>
         </dependency>
     </dependencies>

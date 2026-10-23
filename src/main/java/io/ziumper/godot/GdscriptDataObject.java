@@ -24,11 +24,11 @@ import org.openide.windows.TopComponent;
 })
 @MIMEResolver.ExtensionRegistration(
         displayName = "#LBL_Gdscript_LOADER",
-        mimeType = "text/x-gdscript",
+        mimeType = "text/gdscript",
         extension = {"gd"}
 )
 @DataObject.Registration(
-        mimeType = "text/x-gdscript",
+        mimeType = "text/gdscript",
         iconBase = "io/ziumper/godot/godot-icon.png",
         displayName = "#LBL_Gdscript_LOADER",
         position = 300
@@ -85,12 +85,12 @@ import org.openide.windows.TopComponent;
             position = 1400
     )
 })
-@GrammarRegistration(grammar="GDScript.tmLanguage.json", mimeType="text/x-gdscript")
+@GrammarRegistration(grammar="GDScript.tmLanguage.json", mimeType="text/gdscript")
 public class GdscriptDataObject extends MultiDataObject {
 
     public GdscriptDataObject(FileObject pf, MultiFileLoader loader) throws DataObjectExistsException, IOException {
         super(pf, loader);
-        registerEditor("text/x-gdscript", false);
+        registerEditor("text/gdscript", false);
     }
 
     @Override
