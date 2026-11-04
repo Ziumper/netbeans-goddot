@@ -5,6 +5,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -14,6 +16,7 @@ import org.netbeans.modules.lsp.client.spi.ServerRestarter;
 import org.netbeans.api.project.Project;
 import org.openide.util.Lookup;
 import org.openide.util.RequestProcessor;
+import org.openide.util.lookup.Lookups;
 
 /**
  * Connects GDScript editors directly to the Godot Editor LSP server over TCP.
@@ -26,6 +29,8 @@ public class GdscriptClient implements LanguageServerProvider {
 
     /** The single pending retry task; guarantees one retry loop at a time. */
     private static RequestProcessor.Task retryTask;
+    /** languageId Godot's LSP server recognises. */
+    static final String LANGUAGE_ID = "gdscript";
     private static final Object LOCK = new Object();
 
     /** Last failure message logged, so repeated identical failures do not flood messages.log. */
@@ -52,7 +57,7 @@ public class GdscriptClient implements LanguageServerProvider {
                 lastFailure = null;
             }
             LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
-            return LanguageServerDescription.create(in, out, new SocketProcess(socket));
+            return createDescription(new GodotNotificationFilter(in), out, new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
             String failure = host + ":" + port + " " + ex;
@@ -66,6 +71,54 @@ public class GdscriptClient implements LanguageServerProvider {
                     + " (is the Godot editor running with the LSP enabled?)", ex);
             scheduleRetry(restarter);
             return null;
+        }
+    }
+
+    /**
+     * Godot ignores didOpen with a MIME-type languageId ("text/gdscript", the lsp.client default) and then
+     * answers every completion with an empty list; it needs the plain id "gdscript". The 4-argument
+     * {@code create(..., Lookup)} that carries a LanguageIdResolver is missing from the RELEASE280 artifact
+     * this module compiles against, so it is called reflectively.
+     */
+    private static LanguageServerDescription createDescription(InputStream in, OutputStream out, Process process) {
+        try {
+            Method create = LanguageServerDescription.class.getMethod("create",
+                    InputStream.class, OutputStream.class, Process.class, Lookup.class);
+            return (LanguageServerDescription) create.invoke(null, in, out, process, languageIdLookup());
+        } catch (ReflectiveOperationException | LinkageError ex) {
+            LOG.log(Level.WARNING, "Cannot attach LanguageIdResolver; completion may return no items", ex);
+            return LanguageServerDescription.create(in, out, process);
+        }
+    }
+
+    /**
+     * Lookup carrying a {@code LanguageIdResolver} that always answers {@link #LANGUAGE_ID}. The SPI interface
+     * exists in the installed lsp.client but not in the RELEASE280 artifact this module compiles against,
+     * hence the reflective proxy.
+     */
+    private static Lookup languageIdLookup() {
+        try {
+            Class<?> type = Class.forName("org.netbeans.modules.lsp.client.spi.LanguageIdResolver",
+                    false, LanguageServerProvider.class.getClassLoader());
+            Object resolver = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "resolveLanguageId":
+                                return LANGUAGE_ID;
+                            case "toString":
+                                return "GdscriptLanguageIdResolver";
+                            case "hashCode":
+                                return System.identityHashCode(proxy);
+                            case "equals":
+                                return proxy == args[0];
+                            default:
+                                return null;
+                        }
+                    });
+            return Lookups.singleton(resolver);
+        } catch (ReflectiveOperationException | LinkageError ex) {
+            LOG.log(Level.WARNING, "LanguageIdResolver not available; completion may return no items", ex);
+            return Lookup.EMPTY;
         }
     }
 
