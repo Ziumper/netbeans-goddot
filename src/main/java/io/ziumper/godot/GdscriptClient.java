@@ -5,12 +5,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.netbeans.api.editor.mimelookup.MimeRegistration;
+import org.netbeans.modules.lsp.client.spi.LanguageIdResolver;
 import org.netbeans.modules.lsp.client.spi.LanguageServerProvider;
 import org.netbeans.modules.lsp.client.spi.ServerRestarter;
 import org.netbeans.api.project.Project;
@@ -76,50 +75,12 @@ public class GdscriptClient implements LanguageServerProvider {
 
     /**
      * Godot ignores didOpen with a MIME-type languageId ("text/gdscript", the lsp.client default) and then
-     * answers every completion with an empty list; it needs the plain id "gdscript". The 4-argument
-     * {@code create(..., Lookup)} that carries a LanguageIdResolver is missing from the RELEASE280 artifact
-     * this module compiles against, so it is called reflectively.
+     * answers every completion with an empty list; it needs the plain id "gdscript". A LanguageIdResolver
+     * passed in the description's Lookup makes lsp.client send that id.
      */
     private static LanguageServerDescription createDescription(InputStream in, OutputStream out, Process process) {
-        try {
-            Method create = LanguageServerDescription.class.getMethod("create",
-                    InputStream.class, OutputStream.class, Process.class, Lookup.class);
-            return (LanguageServerDescription) create.invoke(null, in, out, process, languageIdLookup());
-        } catch (ReflectiveOperationException | LinkageError ex) {
-            LOG.log(Level.WARNING, "Cannot attach LanguageIdResolver; completion may return no items", ex);
-            return LanguageServerDescription.create(in, out, process);
-        }
-    }
-
-    /**
-     * Lookup carrying a {@code LanguageIdResolver} that always answers {@link #LANGUAGE_ID}. The SPI interface
-     * exists in the installed lsp.client but not in the RELEASE280 artifact this module compiles against,
-     * hence the reflective proxy.
-     */
-    private static Lookup languageIdLookup() {
-        try {
-            Class<?> type = Class.forName("org.netbeans.modules.lsp.client.spi.LanguageIdResolver",
-                    false, LanguageServerProvider.class.getClassLoader());
-            Object resolver = Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type},
-                    (proxy, method, args) -> {
-                        switch (method.getName()) {
-                            case "resolveLanguageId":
-                                return LANGUAGE_ID;
-                            case "toString":
-                                return "GdscriptLanguageIdResolver";
-                            case "hashCode":
-                                return System.identityHashCode(proxy);
-                            case "equals":
-                                return proxy == args[0];
-                            default:
-                                return null;
-                        }
-                    });
-            return Lookups.singleton(resolver);
-        } catch (ReflectiveOperationException | LinkageError ex) {
-            LOG.log(Level.WARNING, "LanguageIdResolver not available; completion may return no items", ex);
-            return Lookup.EMPTY;
-        }
+        LanguageIdResolver resolver = file -> LANGUAGE_ID;
+        return LanguageServerDescription.create(in, out, process, Lookups.singleton(resolver));
     }
 
     private static void scheduleRetry(ServerRestarter restarter) {
