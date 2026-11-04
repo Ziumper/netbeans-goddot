@@ -1,10 +1,11 @@
 package io.ziumper.godot;
 
 import javax.swing.Icon;
-import javax.swing.ImageIcon;
 import org.netbeans.api.project.SourceGroup;
 import org.openide.filesystems.FileObject;
+import org.netbeans.api.queries.VisibilityQuery;
 import org.openide.filesystems.FileUtil;
+import org.openide.util.ImageUtilities;
 
 public class GodotSourceGroup implements SourceGroup {
 
@@ -37,12 +38,21 @@ public class GodotSourceGroup implements SourceGroup {
 
     @Override
     public Icon getIcon(boolean bln) {
-        return new ImageIcon(GodotProject.class.getResource(
-                    "/io/ziumper/godot/godot-icon.png"));
+        return ImageUtilities.loadImageIcon(GodotProjectInformation.ICON_PATH, false);
     }
 
     @Override
     public boolean contains(FileObject fo) {
-        return FileUtil.isParentOf(project.getProjectDirectory(), fo);
+        FileObject root = project.getProjectDirectory();
+        if (fo != root && !FileUtil.isParentOf(root, fo)) {
+            return false;
+        }
+        // Reject anything below a hidden/ignored path element (.godot, *.import, VisibilityQuery).
+        for (FileObject f = fo; f != null && !f.equals(root); f = f.getParent()) {
+            if (GodotLogicalViewProvider.isHidden(f) || !VisibilityQuery.getDefault().isVisible(f)) {
+                return false;
+            }
+        }
+        return true;
     }
 }

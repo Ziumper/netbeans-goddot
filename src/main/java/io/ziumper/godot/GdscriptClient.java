@@ -11,6 +11,7 @@ import java.util.logging.Logger;
 import org.netbeans.api.editor.mimelookup.MimeRegistration;
 import org.netbeans.modules.lsp.client.spi.LanguageServerProvider;
 import org.netbeans.modules.lsp.client.spi.ServerRestarter;
+import org.netbeans.api.project.Project;
 import org.openide.util.Lookup;
 import org.openide.util.RequestProcessor;
 
@@ -27,11 +28,18 @@ public class GdscriptClient implements LanguageServerProvider {
     private static RequestProcessor.Task retryTask;
     private static final Object LOCK = new Object();
 
+    /** Last failure message logged, so repeated identical failures do not flood messages.log. */
+    private static String lastFailure;
+
     @Override
     public LanguageServerDescription startServer(Lookup lkp) {
         ServerRestarter restarter = lkp.lookup(ServerRestarter.class);
         String host = GodotLspSettings.getHost();
         int port = GodotLspSettings.getPort();
+
+        Project prj = lkp.lookup(Project.class);
+        LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
+                new Object[]{prj != null ? prj.getProjectDirectory().getPath() : "<none>", host, port});
 
         Socket socket = new Socket();
         try {
@@ -40,11 +48,22 @@ public class GdscriptClient implements LanguageServerProvider {
             socket.connect(new InetSocketAddress(host, port), GodotLspSettings.getConnectTimeoutMs());
             InputStream in = socket.getInputStream();
             OutputStream out = socket.getOutputStream();
+            synchronized (LOCK) {
+                lastFailure = null;
+            }
             LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
             return LanguageServerDescription.create(in, out, new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
-            LOG.log(Level.FINE, "Godot LSP not reachable at " + host + ":" + port, ex);
+            String failure = host + ":" + port + " " + ex;
+            boolean first;
+            synchronized (LOCK) {
+                first = !failure.equals(lastFailure);
+                lastFailure = failure;
+            }
+            // INFO once per distinct failure; details at FINE afterwards.
+            LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not reachable at " + host + ":" + port
+                    + " (is the Godot editor running with the LSP enabled?)", ex);
             scheduleRetry(restarter);
             return null;
         }
@@ -78,7 +97,7 @@ public class GdscriptClient implements LanguageServerProvider {
             }
             return;
         }
-        LOG.log(Level.FINE, "Godot LSP reachable, restarting client");
+        LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting client", new Object[]{host, port});
         restarter.restart();
     }
 
