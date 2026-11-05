@@ -20,6 +20,9 @@ final class GodotNotificationFilter extends InputStream {
 
     /** Notification methods that are swallowed. */
     private static final List<String> DROPPED_METHODS = List.of("gdscript/capabilities", "gdscript_client/changeWorkspace");
+    /** Godot's window messages (showMessage/logMessage) containing one of these texts are swallowed. */
+    private static final List<String> DROPPED_WINDOW_MESSAGES = List.of(
+            "might not work correctly with other project");
     /** A notification carries its "method" key before the (potentially huge) params; only this prefix is inspected. */
     private static final int SNIFF_LIMIT = 256;
     private static final int MAX_HEADER = 4096;
@@ -130,6 +133,14 @@ final class GodotNotificationFilter extends InputStream {
         String head = new String(body, 0, Math.min(body.length, SNIFF_LIMIT), StandardCharsets.UTF_8);
         if (head.contains("\"id\"")) {
             return false; // a request or response, never drop
+        }
+        if (head.contains("\"method\":\"window/") || head.contains("\"method\": \"window/")) {
+            String text = new String(body, StandardCharsets.UTF_8); // window messages are short
+            for (String message : DROPPED_WINDOW_MESSAGES) {
+                if (text.contains(message)) {
+                    return true;
+                }
+            }
         }
         for (String method : DROPPED_METHODS) {
             if (head.contains("\"method\":\"" + method + "\"") || head.contains("\"method\": \"" + method + "\"")) {

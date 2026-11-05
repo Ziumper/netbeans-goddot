@@ -30,6 +30,8 @@ import org.openide.util.lookup.Lookups;
 @Messages({
     "MSG_LspUnreachableTitle=Godot LSP not connected",
     "MSG_LspUnreachableText=Could not reach the Godot LSP at {0}. Open the project in the Godot Editor, then reopen the .gd file.",
+    "MSG_LspConnectedTitle=Godot LSP connected",
+    "MSG_LspConnectedText=Connected to the Godot LSP at {0}.",
     "MSG_LspLostTitle=Godot LSP disconnected",
     "MSG_LspLostText=The connection to the Godot LSP at {0} was lost. Completion and diagnostics stop until it reconnects."
 })
@@ -49,6 +51,8 @@ public class GdscriptClient implements LanguageServerProvider {
 
     /** Last failure message logged, so repeated identical failures do not flood messages.log. */
     private static String lastFailure;
+    /** True until a connection is announced; set again after a failure or a lost connection. Guarded by LOCK. */
+    private static boolean announceConnect = true;
 
     @Override
     public LanguageServerDescription startServer(Lookup lkp) {
@@ -67,11 +71,22 @@ public class GdscriptClient implements LanguageServerProvider {
             socket.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
             InputStream in = socket.getInputStream();
             OutputStream out = socket.getOutputStream();
+            boolean announce;
             synchronized (LOCK) {
                 lastFailure = null;
+                announce = announceConnect;
+                announceConnect = false;
             }
             LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
             String target = host + ":" + port;
+            if (announce) {
+                NotificationDisplayer.getDefault().notify(
+                        Bundle.MSG_LspConnectedTitle(),
+                        ICON,
+                        Bundle.MSG_LspConnectedText(target),
+                        null,
+                        NotificationDisplayer.Priority.NORMAL);
+            }
             return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target)), out,
                     new SocketProcess(socket));
         } catch (IOException ex) {
@@ -81,6 +96,7 @@ public class GdscriptClient implements LanguageServerProvider {
             synchronized (LOCK) {
                 first = !failure.equals(lastFailure);
                 lastFailure = failure;
+                announceConnect = true;
             }
             // INFO once per distinct failure; details at FINE afterwards.
             LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not reachable at " + host + ":" + port
@@ -112,6 +128,9 @@ public class GdscriptClient implements LanguageServerProvider {
                     return;
                 }
                 reported = true;
+                synchronized (LOCK) {
+                    announceConnect = true;
+                }
                 LOG.log(Level.INFO, "Lost connection to Godot LSP at {0}", target);
                 NotificationDisplayer.getDefault().notify(
                         Bundle.MSG_LspLostTitle(),
