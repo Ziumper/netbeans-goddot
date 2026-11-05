@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE filesystem PUBLIC "-//NetBeans//DTD Filesystem 1.2//EN" "http://www.netbeans.org/dtds/filesystem-1_2.dtd">
+<filesystem>
+    <folder name="Editors">
+        <folder name="text">
+            <folder name="gdscript">
+                <folder name="Preferences">
+                    <folder name="Defaults">
+                        <!-- Default formatting following the Godot GDScript style guide (tabs, width 4). -->
+                        <file name="org-netbeans-modules-editor-settings-CustomPreferences.xml" url="gdscript/GdscriptPreferences.xml"/>
+                    </folder>
+                </folder>
+            </folder>
+        </folder>
+    </folder>
+</filesystem>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE editor-preferences PUBLIC "-//NetBeans//DTD Editor Preferences 1.0//EN" "http://www.netbeans.org/dtds/EditorPreferences-1_0.dtd">
+<!--
+    GDScript defaults matching the Godot editor and the official style guide:
+    https://docs.godotengine.org/en/stable/tutorials/scripting/gdscript/gdscript_styleguide.html
+    - indent with tabs (not spaces), tab width 4
+    - keep lines under 100 characters
+-->
+<editor-preferences>
+    <entry name="expand-tabs" value="false" javaType="java.lang.Boolean"/>
+    <entry name="indent-shift-width" value="4" javaType="java.lang.Integer"/>
+    <entry name="spaces-per-tab" value="4" javaType="java.lang.Integer"/>
+    <entry name="tab-size" value="4" javaType="java.lang.Integer"/>
+    <entry name="text-limit-width" value="100" javaType="java.lang.Integer"/>
+</editor-preferences>
