@@ -1,4 +1,8 @@
-package io.ziumper.godot;
+package io.ziumper.godot.options;
+
+import io.ziumper.godot.engine.GodotVersion;
+
+import io.ziumper.godot.engine.GodotExecutables;
 
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
@@ -55,10 +59,10 @@ final class GodotOptionsPanel extends JPanel {
 
     private final JTextField executable = new JTextField(30);
     private final JTextField host = new JTextField(20);
-    private final JSpinner port = new JSpinner(new SpinnerNumberModel(GodotLspSettings.DEFAULT_PORT, 0, 99999, 1));
-    private final JSpinner timeout = new JSpinner(new SpinnerNumberModel(GodotLspSettings.DEFAULT_CONNECT_TIMEOUT, 0, 600000, 100));
+    private final JSpinner port = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_PORT, 0, 99999, 1));
+    private final JSpinner timeout = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_CONNECT_TIMEOUT, 0, 600000, 100));
     private final JCheckBox autoReconnect = new JCheckBox(Bundle.LBL_AutoReconnect());
-    private final JSpinner retry = new JSpinner(new SpinnerNumberModel(GodotLspSettings.DEFAULT_RETRY_INTERVAL, 0, 3600000, 500));
+    private final JSpinner retry = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_RETRY_INTERVAL, 0, 3600000, 500));
 
     private static final RequestProcessor RP = new RequestProcessor("Godot options test", 1);
     /** Non-blocking hint about the Godot path; never affects {@link #valid()}. */
@@ -195,7 +199,7 @@ final class GodotOptionsPanel extends JPanel {
     /** The path that will actually be used: an empty field falls back to the default. */
     private String effectiveExecutable() {
         String exe = executable.getText().trim();
-        return exe.isEmpty() ? GodotLspSettings.DEFAULT_GODOT_EXECUTABLE : exe;
+        return exe.isEmpty() ? GodotSettings.DEFAULT_GODOT_EXECUTABLE : exe;
     }
 
     /** Updates the non-blocking Godot path warning (never affects validity). */
@@ -265,24 +269,24 @@ final class GodotOptionsPanel extends JPanel {
     }
 
     void load() {
-        executable.setText(GodotLspSettings.getGodotExecutable());
-        host.setText(GodotLspSettings.getHost());
-        port.setValue(GodotLspSettings.getPort());
-        timeout.setValue(GodotLspSettings.getConnectTimeoutMs());
-        autoReconnect.setSelected(GodotLspSettings.isAutoReconnect());
-        retry.setValue(GodotLspSettings.getRetryIntervalMs());
+        executable.setText(GodotSettings.getGodotExecutable());
+        host.setText(GodotSettings.getHost());
+        port.setValue(GodotSettings.getPort());
+        timeout.setValue(GodotSettings.getConnectTimeoutMs());
+        autoReconnect.setSelected(GodotSettings.isAutoReconnect());
+        retry.setValue(GodotSettings.getRetryIntervalMs());
         updateExecutableError();
         updateValidationError();
     }
 
     void store() {
-        // An empty field is stored as-is; GodotLspSettings falls back to the default on read.
-        GodotLspSettings.setGodotExecutable(executable.getText().trim());
-        GodotLspSettings.setHost(host.getText().trim());
-        GodotLspSettings.setPort(intOf(port));
-        GodotLspSettings.setConnectTimeoutMs(intOf(timeout));
-        GodotLspSettings.setAutoReconnect(autoReconnect.isSelected());
-        GodotLspSettings.setRetryIntervalMs(intOf(retry));
+        // An empty field is stored as-is; GodotSettings falls back to the default on read.
+        GodotSettings.setGodotExecutable(executable.getText().trim());
+        GodotSettings.setHost(host.getText().trim());
+        GodotSettings.setPort(intOf(port));
+        GodotSettings.setConnectTimeoutMs(intOf(timeout));
+        GodotSettings.setAutoReconnect(autoReconnect.isSelected());
+        GodotSettings.setRetryIntervalMs(intOf(retry));
     }
 
     boolean valid() {
@@ -292,12 +296,12 @@ final class GodotOptionsPanel extends JPanel {
 
     /** True when any field differs from the stored (normalized) settings. */
     boolean changed() {
-        return !effectiveExecutable().equals(GodotLspSettings.getGodotExecutable())
-                || !host.getText().trim().equals(GodotLspSettings.getHost())
-                || intOf(port) != GodotLspSettings.getPort()
-                || intOf(timeout) != GodotLspSettings.getConnectTimeoutMs()
-                || autoReconnect.isSelected() != GodotLspSettings.isAutoReconnect()
-                || intOf(retry) != GodotLspSettings.getRetryIntervalMs();
+        return !effectiveExecutable().equals(GodotSettings.getGodotExecutable())
+                || !host.getText().trim().equals(GodotSettings.getHost())
+                || intOf(port) != GodotSettings.getPort()
+                || intOf(timeout) != GodotSettings.getConnectTimeoutMs()
+                || autoReconnect.isSelected() != GodotSettings.isAutoReconnect()
+                || intOf(retry) != GodotSettings.getRetryIntervalMs();
     }
 
     private static int intOf(JSpinner s) {

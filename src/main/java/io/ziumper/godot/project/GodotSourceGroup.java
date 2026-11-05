@@ -1,5 +1,6 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
 
+import io.ziumper.godot.GodotIcons;
 import javax.swing.Icon;
 import org.netbeans.api.project.SourceGroup;
 import org.openide.filesystems.FileObject;
@@ -38,7 +39,7 @@ public class GodotSourceGroup implements SourceGroup {
 
     @Override
     public Icon getIcon(boolean bln) {
-        return ImageUtilities.loadImageIcon(GodotProjectInformation.ICON_PATH, false);
+        return ImageUtilities.loadImageIcon(GodotIcons.GODOT_ICON, false);
     }
 
     @Override

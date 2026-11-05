@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
 
 import javax.swing.event.ChangeListener;
 import org.netbeans.api.project.SourceGroup;

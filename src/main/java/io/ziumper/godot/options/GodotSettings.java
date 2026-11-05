@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.options;
 
 import java.util.prefs.Preferences;
 import org.openide.util.NbPreferences;
@@ -7,7 +7,7 @@ import org.openide.util.NbPreferences;
  * Settings of the connection to the Godot Editor LSP server.
  * Stored in NbPreferences (no Options panel, see report).
  */
-public final class GodotLspSettings {
+public final class GodotSettings {
 
     public static final String PROP_HOST = "host";
     public static final String PROP_PORT = "port";
@@ -24,11 +24,11 @@ public final class GodotLspSettings {
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
     public static final int DEFAULT_RETRY_INTERVAL = 3000;
 
-    private GodotLspSettings() {
+    private GodotSettings() {
     }
 
     private static Preferences prefs() {
-        return NbPreferences.forModule(GodotLspSettings.class);
+        return NbPreferences.forModule(GodotSettings.class);
     }
 
     public static String getHost() {

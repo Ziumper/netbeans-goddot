@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.lsp;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;

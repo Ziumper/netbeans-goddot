@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.options;
 
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;

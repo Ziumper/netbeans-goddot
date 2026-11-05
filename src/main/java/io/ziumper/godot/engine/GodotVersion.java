@@ -1,4 +1,6 @@
-package io.ziumper.godot;
+package io.ziumper.godot.engine;
+
+import io.ziumper.godot.options.GodotSettings;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -9,7 +11,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Detects the version of the configured Godot executable by running {@code <exe> --version}. */
-final class GodotVersion {
+public final class GodotVersion {
 
     private static final long TIMEOUT_SECONDS = 4;
     /** Matches a line like {@code 4.6.3.stable.official.7d41c59c4}; captures major.minor. */
@@ -19,11 +21,11 @@ final class GodotVersion {
     }
 
     /** Version of the configured executable as {@code major.minor}, or empty on any failure. Blocking; not for the EDT. */
-    static Optional<String> detect() {
-        return detect(GodotLspSettings.getGodotExecutable());
+    public static Optional<String> detect() {
+        return detect(GodotSettings.getGodotExecutable());
     }
 
-    static Optional<String> detect(String exe) {
+    public static Optional<String> detect(String exe) {
         if (exe == null || !GodotExecutables.isExecutable(exe)) {
             return Optional.empty();
         }

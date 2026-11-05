@@ -1,9 +1,6 @@
-/*
- * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
- * Click nbfs://nbhost/SystemFileSystem/Templates/NetBeansModuleDevelopment-files/templateDataObjectAnno.java to edit this template
- */
-package io.ziumper.godot;
+package io.ziumper.godot.gdscript;
 
+import io.ziumper.godot.GodotIcons;
 import java.io.IOException;
 import org.netbeans.modules.textmate.lexer.api.GrammarRegistration;
 import org.openide.awt.ActionID;
@@ -29,7 +26,7 @@ import org.openide.windows.TopComponent;
 )
 @DataObject.Registration(
         mimeType = "text/gdscript",
-        iconBase = "io/ziumper/godot/godot-icon.png",
+        iconBase = GodotIcons.GODOT_ICON,
         displayName = "#LBL_Gdscript_LOADER",
         position = 300
 )

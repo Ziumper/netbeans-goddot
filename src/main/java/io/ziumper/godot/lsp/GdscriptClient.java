@@ -1,4 +1,6 @@
-package io.ziumper.godot;
+package io.ziumper.godot.lsp;
+
+import io.ziumper.godot.options.GodotSettings;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,8 +40,8 @@ public class GdscriptClient implements LanguageServerProvider {
     @Override
     public LanguageServerDescription startServer(Lookup lkp) {
         ServerRestarter restarter = lkp.lookup(ServerRestarter.class);
-        String host = GodotLspSettings.getHost();
-        int port = GodotLspSettings.getPort();
+        String host = GodotSettings.getHost();
+        int port = GodotSettings.getPort();
 
         Project prj = lkp.lookup(Project.class);
         LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
@@ -49,7 +51,7 @@ public class GdscriptClient implements LanguageServerProvider {
         try {
             socket.setTcpNoDelay(true);
             socket.setKeepAlive(true);
-            socket.connect(new InetSocketAddress(host, port), GodotLspSettings.getConnectTimeoutMs());
+            socket.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
             InputStream in = socket.getInputStream();
             OutputStream out = socket.getOutputStream();
             synchronized (LOCK) {
@@ -84,7 +86,7 @@ public class GdscriptClient implements LanguageServerProvider {
     }
 
     private static void scheduleRetry(ServerRestarter restarter) {
-        if (restarter == null || !GodotLspSettings.isAutoReconnect()) {
+        if (restarter == null || !GodotSettings.isAutoReconnect()) {
             return;
         }
         synchronized (LOCK) {
@@ -94,19 +96,19 @@ public class GdscriptClient implements LanguageServerProvider {
             if (retryTask == null) {
                 retryTask = RP.create(() -> retry(restarter));
             }
-            retryTask.schedule(GodotLspSettings.getRetryIntervalMs());
+            retryTask.schedule(GodotSettings.getRetryIntervalMs());
         }
     }
 
     private static void retry(ServerRestarter restarter) {
-        String host = GodotLspSettings.getHost();
-        int port = GodotLspSettings.getPort();
+        String host = GodotSettings.getHost();
+        int port = GodotSettings.getPort();
         try (Socket probe = new Socket()) {
-            probe.connect(new InetSocketAddress(host, port), GodotLspSettings.getConnectTimeoutMs());
+            probe.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
         } catch (IOException ex) {
-            if (GodotLspSettings.isAutoReconnect()) {
+            if (GodotSettings.isAutoReconnect()) {
                 synchronized (LOCK) {
-                    retryTask.schedule(GodotLspSettings.getRetryIntervalMs());
+                    retryTask.schedule(GodotSettings.getRetryIntervalMs());
                 }
             }
             return;

@@ -1,15 +1,15 @@
-package io.ziumper.godot;
+package io.ziumper.godot.engine;
 
 import java.io.File;
 
 /** Shared helpers for locating the Godot executable. */
-final class GodotExecutables {
+public final class GodotExecutables {
 
     private GodotExecutables() {
     }
 
     /** True if {@code exe} is an executable file, either as a path or found on PATH. */
-    static boolean isExecutable(String exe) {
+    public static boolean isExecutable(String exe) {
         File f = new File(exe);
         if (f.getParent() != null || exe.contains(File.separator)) {
             return f.isFile() && f.canExecute();

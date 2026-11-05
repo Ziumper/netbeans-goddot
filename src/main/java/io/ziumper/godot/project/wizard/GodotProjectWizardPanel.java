@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project.wizard;
 
 import java.awt.Component;
 import java.io.File;

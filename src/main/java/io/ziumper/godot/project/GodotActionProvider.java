@@ -1,4 +1,8 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
+
+import io.ziumper.godot.engine.GodotExecutables;
+
+import io.ziumper.godot.options.GodotSettings;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -67,11 +71,11 @@ final class GodotActionProvider implements ActionProvider {
             return;
         }
 
-        String exe = GodotLspSettings.getGodotExecutable();
+        String exe = GodotSettings.getGodotExecutable();
         if (!isExecutable(exe)) {
             notify("Godot executable \"" + exe + "\" was not found or is not executable.\n"
-                    + "Set the preference \"" + GodotLspSettings.PROP_GODOT_EXECUTABLE
-                    + "\" (GodotLspSettings) or put godot on PATH.");
+                    + "Set the preference \"" + GodotSettings.PROP_GODOT_EXECUTABLE
+                    + "\" (GodotSettings) or put godot on PATH.");
             return;
         }
 

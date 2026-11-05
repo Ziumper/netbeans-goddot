@@ -1,5 +1,6 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
 
+import io.ziumper.godot.GodotIcons;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import java.io.IOException;
@@ -18,8 +19,6 @@ import org.openide.util.WeakListeners;
 
 /** Project name and icon; the display name comes from config/name in project.godot. */
 final class GodotProjectInformation implements ProjectInformation {
-
-    static final String ICON_PATH = "io/ziumper/godot/godot-icon.png";
 
     private static final Pattern NAME_LINE
             = Pattern.compile("^\\s*config/name\\s*=\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*$");
@@ -129,7 +128,7 @@ final class GodotProjectInformation implements ProjectInformation {
 
     @Override
     public Icon getIcon() {
-        return ImageUtilities.loadImageIcon(ICON_PATH, false);
+        return ImageUtilities.loadImageIcon(GodotIcons.GODOT_ICON, false);
     }
 
     @Override

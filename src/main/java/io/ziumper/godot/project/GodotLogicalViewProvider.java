@@ -1,5 +1,6 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
 
+import io.ziumper.godot.GodotIcons;
 import java.awt.Image;
 import java.beans.PropertyChangeEvent;
 import java.beans.PropertyChangeListener;
@@ -121,7 +122,7 @@ public class GodotLogicalViewProvider implements LogicalViewProvider {
 
         @Override
         public Image getIcon(int type) {
-            return ImageUtilities.loadImage(GodotProjectInformation.ICON_PATH, true);
+            return ImageUtilities.loadImage(GodotIcons.GODOT_ICON, true);
         }
 
         @Override

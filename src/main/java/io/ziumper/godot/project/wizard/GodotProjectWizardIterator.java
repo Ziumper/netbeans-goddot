@@ -1,5 +1,8 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project.wizard;
 
+import io.ziumper.godot.engine.GodotVersion;
+
+import io.ziumper.godot.GodotIcons;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -23,7 +26,7 @@ import org.openide.util.NbBundle.Messages;
         folder = "Project/Godot",
         displayName = "#TPL_GodotProject_name",
         description = "GodotProjectDescription.html",
-        iconBase = "io/ziumper/godot/godot-icon.png",
+        iconBase = GodotIcons.GODOT_ICON,
         position = 100)
 @Messages({
     "TPL_GodotProject_name=Godot Project",

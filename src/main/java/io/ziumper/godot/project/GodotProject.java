@@ -1,4 +1,4 @@
-package io.ziumper.godot;
+package io.ziumper.godot.project;
 
 import org.netbeans.api.project.Project;
 import org.netbeans.spi.project.ProjectState;
