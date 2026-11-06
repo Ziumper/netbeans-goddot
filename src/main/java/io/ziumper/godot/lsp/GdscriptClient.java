@@ -41,8 +41,16 @@ public class GdscriptClient implements LanguageServerProvider {
     private static final Logger LOG = Logger.getLogger(GdscriptClient.class.getName());
     private static final RequestProcessor RP = new RequestProcessor(GdscriptClient.class);
 
-    /** The single pending retry task; guarantees one retry loop at a time. */
+    /** The single pending retry task; guarantees one retry loop at a time. Guarded by LOCK. */
     private static RequestProcessor.Task retryTask;
+    /** Restarter of the most recent startServer call; the retry loop always restarts this one. Guarded by LOCK. */
+    private static ServerRestarter currentRestarter;
+    /** True while a connection made by startServer is believed alive. Guarded by LOCK. */
+    private static boolean connected;
+    /** Start of the current run of failed retries (nanoTime), 0 when none. Guarded by LOCK. */
+    private static long retryStart;
+    /** The retry loop gives up after this long without reaching the server; the next startServer re-arms it. */
+    private static final long RETRY_GIVE_UP_NANOS = TimeUnit.MINUTES.toNanos(10);
     /** languageId Godot's LSP server recognises. */
     static final String LANGUAGE_ID = "gdscript";
     private static final Object LOCK = new Object();
@@ -57,6 +65,11 @@ public class GdscriptClient implements LanguageServerProvider {
     @Override
     public LanguageServerDescription startServer(Lookup lkp) {
         ServerRestarter restarter = lkp.lookup(ServerRestarter.class);
+        if (restarter != null) {
+            synchronized (LOCK) {
+                currentRestarter = restarter;
+            }
+        }
         String host = GodotSettings.getHost();
         int port = GodotSettings.getPort();
 
@@ -74,6 +87,8 @@ public class GdscriptClient implements LanguageServerProvider {
             boolean announce;
             synchronized (LOCK) {
                 lastFailure = null;
+                connected = true;
+                retryStart = 0;
                 announce = announceConnect;
                 announceConnect = false;
             }
@@ -87,7 +102,7 @@ public class GdscriptClient implements LanguageServerProvider {
                         null,
                         NotificationDisplayer.Priority.NORMAL);
             }
-            return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target)), out,
+            return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target, restarter)), out,
                     new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
@@ -97,6 +112,7 @@ public class GdscriptClient implements LanguageServerProvider {
                 first = !failure.equals(lastFailure);
                 lastFailure = failure;
                 announceConnect = true;
+                connected = false;
             }
             // INFO once per distinct failure; details at FINE afterwards.
             LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not reachable at " + host + ":" + port
@@ -118,8 +134,9 @@ public class GdscriptClient implements LanguageServerProvider {
     /**
      * Wraps the server's input so that the server closing the connection (EOF) or breaking it (IOException)
      * is reported to the user. A close initiated by this client closes the socket first, so it is not reported.
+     * After reporting, the socket is closed so SocketProcess reports the server as dead, and a reconnect is scheduled.
      */
-    private static InputStream watchForLoss(Socket socket, InputStream in, String target) {
+    private static InputStream watchForLoss(Socket socket, InputStream in, String target, ServerRestarter restarter) {
         return new InputStream() {
             private boolean reported;
 
@@ -130,6 +147,7 @@ public class GdscriptClient implements LanguageServerProvider {
                 reported = true;
                 synchronized (LOCK) {
                     announceConnect = true;
+                    connected = false;
                 }
                 LOG.log(Level.INFO, "Lost connection to Godot LSP at {0}", target);
                 NotificationDisplayer.getDefault().notify(
@@ -138,6 +156,9 @@ public class GdscriptClient implements LanguageServerProvider {
                         Bundle.MSG_LspLostText(target),
                         null,
                         NotificationDisplayer.Priority.NORMAL);
+                // Report first (the check above relies on the socket still being open), then close.
+                closeQuietly(socket);
+                scheduleRetry(restarter);
             }
 
             @Override
@@ -185,22 +206,56 @@ public class GdscriptClient implements LanguageServerProvider {
         return LanguageServerDescription.create(in, out, process, Lookups.singleton(resolver));
     }
 
-    private static void scheduleRetry(ServerRestarter restarter) {
-        if (restarter == null || !GodotSettings.isAutoReconnect()) {
-            return;
-        }
+    /**
+     * Restarts the LSP client through the last known restarter, e.g. after the connection settings changed.
+     * Does nothing if no restarter has been seen yet (no .gd editor has started the server).
+     */
+    public static void reconnect() {
+        ServerRestarter restarter;
         synchronized (LOCK) {
-            if (retryTask != null && !retryTask.isFinished()) {
-                return; // a retry is already pending
-            }
-            if (retryTask == null) {
-                retryTask = RP.create(() -> retry(restarter));
-            }
-            retryTask.schedule(GodotSettings.getRetryIntervalMs());
+            restarter = currentRestarter;
+        }
+        if (restarter != null) {
+            RP.post(restarter::restart);
         }
     }
 
-    private static void retry(ServerRestarter restarter) {
+    private static void scheduleRetry(ServerRestarter restarter) {
+        if (!GodotSettings.isAutoReconnect()) {
+            return;
+        }
+        synchronized (LOCK) {
+            if (restarter != null) {
+                currentRestarter = restarter;
+            }
+            if (currentRestarter == null) {
+                return;
+            }
+            if (retryTask == null) {
+                retryTask = RP.create(GdscriptClient::retry);
+            }
+            if (retryTask.isFinished()) {
+                retryStart = 0;
+                retryTask.schedule(GodotSettings.getRetryIntervalMs());
+            }
+        }
+    }
+
+    private static void retry() {
+        ServerRestarter restarter;
+        synchronized (LOCK) {
+            restarter = currentRestarter;
+            if (restarter == null || connected) {
+                return; // somebody (e.g. lsp.client itself) already reconnected
+            }
+            if (retryStart == 0) {
+                retryStart = System.nanoTime();
+            } else if (System.nanoTime() - retryStart > RETRY_GIVE_UP_NANOS) {
+                retryStart = 0;
+                LOG.log(Level.INFO, "Giving up reconnecting to the Godot LSP; it will be retried when a .gd file is opened");
+                return;
+            }
+        }
         String host = GodotSettings.getHost();
         int port = GodotSettings.getPort();
         try (Socket probe = new Socket()) {
@@ -212,6 +267,9 @@ public class GdscriptClient implements LanguageServerProvider {
                 }
             }
             return;
+        }
+        synchronized (LOCK) {
+            retryStart = 0;
         }
         LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting client", new Object[]{host, port});
         restarter.restart();

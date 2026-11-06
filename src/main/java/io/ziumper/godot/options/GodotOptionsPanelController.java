@@ -3,7 +3,7 @@ package io.ziumper.godot.options;
 import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import javax.swing.JComponent;
-import javax.swing.SwingUtilities;
+import io.ziumper.godot.lsp.GdscriptClient;
 import org.netbeans.spi.options.OptionsPanelController;
 import org.openide.util.HelpCtx;
 import org.openide.util.Lookup;
@@ -29,10 +29,16 @@ public final class GodotOptionsPanelController extends OptionsPanelController {
 
     @Override
     public void applyChanges() {
-        SwingUtilities.invokeLater(() -> {
-            getPanel().store();
-            changed = false;
-        });
+        String host = GodotSettings.getHost();
+        int port = GodotSettings.getPort();
+        int timeout = GodotSettings.getConnectTimeoutMs();
+        getPanel().store();
+        changed = false;
+        if (!host.equals(GodotSettings.getHost()) || port != GodotSettings.getPort()
+                || timeout != GodotSettings.getConnectTimeoutMs()) {
+            // The running connection still points at the old target.
+            GdscriptClient.reconnect();
+        }
     }
 
     @Override

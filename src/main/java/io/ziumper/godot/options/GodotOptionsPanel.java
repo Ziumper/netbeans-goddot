@@ -250,7 +250,7 @@ final class GodotOptionsPanel extends JPanel {
         testButton.setEnabled(false);
         testStatus.setText(Bundle.MSG_Testing());
         RP.post(() -> {
-            Optional<String> version = exe.isEmpty() ? Optional.empty() : GodotVersion.detect(exe);
+            Optional<String> version = GodotVersion.detect(exe.isEmpty() ? GodotSettings.DEFAULT_GODOT_EXECUTABLE : exe);
             boolean reachable = false;
             try (Socket socket = new Socket()) {
                 socket.connect(new InetSocketAddress(h, p), Math.max(100, t));
