@@ -23,6 +23,8 @@ final class GodotProjectInformation implements ProjectInformation {
     private static final Pattern NAME_LINE
             = Pattern.compile("^\\s*config/name\\s*=\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*$");
 
+    private static final String PROJECT_FILE = "project.godot";
+
     private final GodotProject project;
     private final PropertyChangeSupport support = new PropertyChangeSupport(this);
     private volatile String displayName;
@@ -31,7 +33,9 @@ final class GodotProjectInformation implements ProjectInformation {
     private final FileChangeAdapter fileListener = new FileChangeAdapter() {
         @Override
         public void fileChanged(FileEvent fe) {
-            refresh();
+            if (isProjectFile(fe.getFile())) {
+                refresh();
+            }
         }
 
         @Override
@@ -52,9 +56,16 @@ final class GodotProjectInformation implements ProjectInformation {
 
         @Override
         public void fileRenamed(FileRenameEvent fe) {
-            refresh();
+            // Either the old or the new name may be project.godot.
+            if (isProjectFile(fe.getFile()) || PROJECT_FILE.equals(fe.getName() + (fe.getExt().isEmpty() ? "" : "." + fe.getExt()))) {
+                refresh();
+            }
         }
     };
+
+    private static boolean isProjectFile(FileObject fo) {
+        return PROJECT_FILE.equals(fo.getNameExt());
+    }
 
     GodotProjectInformation(GodotProject project) {
         this.project = project;
@@ -106,7 +117,7 @@ final class GodotProjectInformation implements ProjectInformation {
                 }
                 Matcher m = NAME_LINE.matcher(line);
                 if (m.matches()) {
-                    String v = m.group(1).replace("\\\"", "\"").replace("\\\\", "\\").trim();
+                    String v = unescape(m.group(1)).trim();
                     return v.isEmpty() ? null : v;
                 }
             }
@@ -114,6 +125,19 @@ final class GodotProjectInformation implements ProjectInformation {
             // Tolerate a missing or malformed file; the caller falls back to the directory name.
         }
         return null;
+    }
+
+    /** Single-pass removal of backslash escapes (\\" and \\\\); other sequences are kept as written. */
+    private static String unescape(String s) {
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length() && (s.charAt(i + 1) == '"' || s.charAt(i + 1) == '\\')) {
+                c = s.charAt(++i);
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     @Override

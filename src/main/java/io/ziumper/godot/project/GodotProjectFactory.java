@@ -16,8 +16,8 @@ public class GodotProjectFactory implements ProjectFactory {
 
     @Override
     public boolean isProject(FileObject dir) {
-        return dir.getChildren().length > 0 &&
-               dir.getFileObject("project.godot") != null;
+        FileObject cfg = dir.getFileObject("project.godot");
+        return cfg != null && cfg.isData();
     }
 
     protected Project createProject(FileObject dir, ProjectState state) {

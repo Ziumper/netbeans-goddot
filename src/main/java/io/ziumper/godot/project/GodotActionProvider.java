@@ -24,7 +24,10 @@ import org.openide.filesystems.FileUtil;
 import org.openide.loaders.DataObject;
 import org.openide.util.Lookup;
 
-/** Run / Run single (.tscn or SceneTree/MainLoop .gd) via the configured Godot executable. */
+/**
+ * Run / Run single (.tscn or SceneTree/MainLoop .gd) via the configured Godot executable.
+ * Enablement checks stay cheap (file extension only); the script content is inspected on invocation.
+ */
 final class GodotActionProvider implements ActionProvider {
 
     private static final String[] SUPPORTED = {COMMAND_RUN, COMMAND_RUN_SINGLE};
@@ -67,6 +70,11 @@ final class GodotActionProvider implements ActionProvider {
             }
             scene = "res://" + FileUtil.getRelativePath(project.getProjectDirectory(), fo);
             script = "gd".equalsIgnoreCase(fo.getExt());
+            if (script && !isMainLoopScript(fo)) {
+                notify("Only scenes (.tscn) and scripts extending SceneTree or MainLoop can be run on their own.\n"
+                        + scene + " does not extend SceneTree or MainLoop.");
+                return;
+            }
         } else if (!COMMAND_RUN.equals(command)) {
             return;
         }
@@ -106,7 +114,11 @@ final class GodotActionProvider implements ActionProvider {
         ExecutionService.newService(processCreator, descriptor, title).run();
     }
 
-    /** The single .tscn file, or runnable .gd script (extends SceneTree/MainLoop), selected in the context, or null. */
+    /**
+ * The single .tscn or .gd file selected in the context, or null. Only the extension is checked here,
+ * because this runs on every selection change; whether a .gd is a SceneTree/MainLoop script is
+ * checked in {@link #invokeAction}.
+ */
     private FileObject runnable(Lookup context) {
         Collection<? extends DataObject> dobjs = context.lookupAll(DataObject.class);
         Collection<? extends FileObject> fos = context.lookupAll(FileObject.class);
@@ -125,13 +137,8 @@ final class GodotActionProvider implements ActionProvider {
         if (count != 1 || found == null || !FileUtil.isParentOf(project.getProjectDirectory(), found)) {
             return null;
         }
-        if ("tscn".equalsIgnoreCase(found.getExt())) {
-            return found;
-        }
-        if ("gd".equalsIgnoreCase(found.getExt()) && isMainLoopScript(found)) {
-            return found;
-        }
-        return null;
+        String ext = found.getExt();
+        return "tscn".equalsIgnoreCase(ext) || "gd".equalsIgnoreCase(ext) ? found : null;
     }
 
     private static final Pattern EXTENDS_LINE = Pattern.compile("^(?:class_name\\s+\\w+\\s+)?extends\\s+(\\w+)\\s*(?:#.*)?$");

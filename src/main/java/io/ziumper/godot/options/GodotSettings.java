@@ -5,7 +5,8 @@ import org.openide.util.NbPreferences;
 
 /**
  * Settings of the connection to the Godot Editor LSP server.
- * Stored in NbPreferences (no Options panel, see report).
+ * Stored in NbPreferences and edited in Tools > Options > Miscellaneous > Godot
+ * (see {@code GodotOptionsPanel}); also holds the path of the Godot executable.
  */
 public final class GodotSettings {
 
