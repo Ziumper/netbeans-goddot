@@ -4,7 +4,8 @@ import java.util.prefs.Preferences;
 import org.openide.util.NbPreferences;
 
 /**
- * Settings of the connection to the Godot Editor LSP server.
+ * Settings of the connection to the Godot LSP server: either an open Godot Editor (host/port) or a
+ * headless server the IDE starts per project.
  * Stored in NbPreferences and edited in Tools > Options > Miscellaneous > Godot
  * (see {@code GodotOptionsPanel}); also holds the path of the Godot executable.
  */
@@ -15,6 +16,7 @@ public final class GodotSettings {
     public static final String PROP_CONNECT_TIMEOUT = "connectTimeoutMs";
     public static final String PROP_AUTO_RECONNECT = "autoReconnect";
     public static final String PROP_RETRY_INTERVAL = "retryIntervalMs";
+    public static final String PROP_HEADLESS_LSP = "headlessLsp";
 
     public static final String PROP_GODOT_EXECUTABLE = "godotExecutable";
 
@@ -24,6 +26,7 @@ public final class GodotSettings {
     public static final int DEFAULT_CONNECT_TIMEOUT = 1000;
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
     public static final int DEFAULT_RETRY_INTERVAL = 3000;
+    public static final boolean DEFAULT_HEADLESS_LSP = false;
 
     private GodotSettings() {
     }
@@ -64,6 +67,15 @@ public final class GodotSettings {
 
     public static void setAutoReconnect(boolean value) {
         prefs().putBoolean(PROP_AUTO_RECONNECT, value);
+    }
+
+    /** True to run a headless Godot LSP per project instead of connecting to host:port. */
+    public static boolean isHeadlessLsp() {
+        return prefs().getBoolean(PROP_HEADLESS_LSP, DEFAULT_HEADLESS_LSP);
+    }
+
+    public static void setHeadlessLsp(boolean value) {
+        prefs().putBoolean(PROP_HEADLESS_LSP, value);
     }
 
     public static int getRetryIntervalMs() {

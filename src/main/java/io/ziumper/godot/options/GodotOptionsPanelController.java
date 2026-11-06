@@ -32,10 +32,12 @@ public final class GodotOptionsPanelController extends OptionsPanelController {
         String host = GodotSettings.getHost();
         int port = GodotSettings.getPort();
         int timeout = GodotSettings.getConnectTimeoutMs();
+        boolean headless = GodotSettings.isHeadlessLsp();
         getPanel().store();
         changed = false;
         if (!host.equals(GodotSettings.getHost()) || port != GodotSettings.getPort()
-                || timeout != GodotSettings.getConnectTimeoutMs()) {
+                || timeout != GodotSettings.getConnectTimeoutMs()
+                || headless != GodotSettings.isHeadlessLsp()) {
             // The running connection still points at the old target.
             GdscriptClient.reconnect();
         }

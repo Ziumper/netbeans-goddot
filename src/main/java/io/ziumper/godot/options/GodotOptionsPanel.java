@@ -36,6 +36,8 @@ import org.openide.util.RequestProcessor;
     "LBL_LspPort=LSP port:",
     "LBL_ConnectTimeout=Connect timeout (ms):",
     "LBL_AutoReconnect=Reconnect automatically",
+    "LBL_HeadlessLsp=Run Godot LSP in background (headless)",
+    "TIP_HeadlessLsp=Starts a headless Godot LSP server per project instead of connecting to an open Godot Editor. Requires Godot 4.2+. Do not combine with the Godot Editor open on the same project.",
     "LBL_RetryInterval=Retry interval (ms):",
     "LBL_SelectGodot=Select Godot executable",
     "MSG_ExecutableWarning=Warning: not an executable file and not found on PATH - Run and version detection won't work.",
@@ -62,6 +64,7 @@ final class GodotOptionsPanel extends JPanel {
     private final JSpinner port = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_PORT, 0, 99999, 1));
     private final JSpinner timeout = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_CONNECT_TIMEOUT, 0, 600000, 100));
     private final JCheckBox autoReconnect = new JCheckBox(Bundle.LBL_AutoReconnect());
+    private final JCheckBox headless = new JCheckBox(Bundle.LBL_HeadlessLsp());
     private final JSpinner retry = new JSpinner(new SpinnerNumberModel(GodotSettings.DEFAULT_RETRY_INTERVAL, 0, 3600000, 500));
 
     private static final RequestProcessor RP = new RequestProcessor("Godot options test", 1);
@@ -86,20 +89,28 @@ final class GodotOptionsPanel extends JPanel {
         ec.anchor = GridBagConstraints.WEST;
         ec.insets = new Insets(0, 4, 4, 4);
         add(executableWarning, ec);
-        addRow(2, Bundle.LBL_LspHost(), host, null);
-        addRow(3, Bundle.LBL_LspPort(), port, null);
-        addRow(4, Bundle.LBL_ConnectTimeout(), timeout, null);
+        headless.setToolTipText(Bundle.TIP_HeadlessLsp());
+        GridBagConstraints hc = new GridBagConstraints();
+        hc.gridx = 1;
+        hc.gridy = 2;
+        hc.gridwidth = 2;
+        hc.anchor = GridBagConstraints.WEST;
+        hc.insets = new Insets(4, 4, 4, 4);
+        add(headless, hc);
+        addRow(3, Bundle.LBL_LspHost(), host, null);
+        addRow(4, Bundle.LBL_LspPort(), port, null);
+        addRow(5, Bundle.LBL_ConnectTimeout(), timeout, null);
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 1;
-        c.gridy = 5;
+        c.gridy = 6;
         c.anchor = GridBagConstraints.WEST;
         c.insets = new Insets(4, 4, 4, 4);
         add(autoReconnect, c);
-        addRow(6, Bundle.LBL_RetryInterval(), retry, null);
+        addRow(7, Bundle.LBL_RetryInterval(), retry, null);
         validationError.setForeground(new Color(0xC0, 0x30, 0x30));
         GridBagConstraints vc = new GridBagConstraints();
         vc.gridx = 1;
-        vc.gridy = 7;
+        vc.gridy = 8;
         vc.gridwidth = 2;
         vc.anchor = GridBagConstraints.WEST;
         vc.insets = new Insets(0, 4, 4, 4);
@@ -107,20 +118,20 @@ final class GodotOptionsPanel extends JPanel {
         testButton.addActionListener(e -> testConnection());
         GridBagConstraints tc = new GridBagConstraints();
         tc.gridx = 0;
-        tc.gridy = 8;
+        tc.gridy = 9;
         tc.anchor = GridBagConstraints.WEST;
         tc.insets = new Insets(8, 4, 4, 4);
         add(testButton, tc);
         GridBagConstraints sc = new GridBagConstraints();
         sc.gridx = 1;
-        sc.gridy = 8;
+        sc.gridy = 9;
         sc.gridwidth = 2;
         sc.anchor = GridBagConstraints.WEST;
         sc.insets = new Insets(8, 4, 4, 4);
         add(testStatus, sc);
         // Absorb extra vertical space so the rows stay at the top.
         GridBagConstraints filler = new GridBagConstraints();
-        filler.gridy = 9;
+        filler.gridy = 10;
         filler.weighty = 1;
         add(new JPanel(), filler);
 
@@ -158,6 +169,18 @@ final class GodotOptionsPanel extends JPanel {
         timeout.addChangeListener(spinnerChanges);
         retry.addChangeListener(spinnerChanges);
         autoReconnect.addChangeListener(changes);
+        headless.addChangeListener(changes);
+        headless.addActionListener(e -> {
+            updateHostPortEnabled();
+            updateValidationError();
+        });
+    }
+
+    /** The editor host and port are not used when the headless server is on. */
+    private void updateHostPortEnabled() {
+        boolean editorMode = !headless.isSelected();
+        host.setEnabled(editorMode);
+        port.setEnabled(editorMode);
     }
 
     private void addRow(int row, String label, java.awt.Component field, JButton button) {
@@ -217,11 +240,14 @@ final class GodotOptionsPanel extends JPanel {
     /** Returns the first blocking validation message, or null when all values are valid. */
     private String validationMessage() {
         int p = intOf(port);
-        if (host.getText().trim().isEmpty()) {
-            return Bundle.MSG_HostEmpty();
-        }
-        if (p < 1 || p > 65535) {
-            return Bundle.MSG_PortRange();
+        // Host and port are ignored (and greyed out) in headless mode.
+        if (!headless.isSelected()) {
+            if (host.getText().trim().isEmpty()) {
+                return Bundle.MSG_HostEmpty();
+            }
+            if (p < 1 || p > 65535) {
+                return Bundle.MSG_PortRange();
+            }
         }
         if (intOf(timeout) <= 0) {
             return Bundle.MSG_TimeoutInvalid();
@@ -275,6 +301,8 @@ final class GodotOptionsPanel extends JPanel {
         timeout.setValue(GodotSettings.getConnectTimeoutMs());
         autoReconnect.setSelected(GodotSettings.isAutoReconnect());
         retry.setValue(GodotSettings.getRetryIntervalMs());
+        headless.setSelected(GodotSettings.isHeadlessLsp());
+        updateHostPortEnabled();
         updateExecutableError();
         updateValidationError();
     }
@@ -287,6 +315,7 @@ final class GodotOptionsPanel extends JPanel {
         GodotSettings.setConnectTimeoutMs(intOf(timeout));
         GodotSettings.setAutoReconnect(autoReconnect.isSelected());
         GodotSettings.setRetryIntervalMs(intOf(retry));
+        GodotSettings.setHeadlessLsp(headless.isSelected());
     }
 
     boolean valid() {
@@ -301,7 +330,8 @@ final class GodotOptionsPanel extends JPanel {
                 || intOf(port) != GodotSettings.getPort()
                 || intOf(timeout) != GodotSettings.getConnectTimeoutMs()
                 || autoReconnect.isSelected() != GodotSettings.isAutoReconnect()
-                || intOf(retry) != GodotSettings.getRetryIntervalMs();
+                || intOf(retry) != GodotSettings.getRetryIntervalMs()
+                || headless.isSelected() != GodotSettings.isHeadlessLsp();
     }
 
     private static int intOf(JSpinner s) {

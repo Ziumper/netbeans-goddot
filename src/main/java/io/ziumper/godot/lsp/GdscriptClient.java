@@ -3,6 +3,7 @@ package io.ziumper.godot.lsp;
 import io.ziumper.godot.GodotIcons;
 import io.ziumper.godot.options.GodotSettings;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -18,6 +19,7 @@ import org.netbeans.modules.lsp.client.spi.LanguageServerProvider;
 import org.netbeans.modules.lsp.client.spi.ServerRestarter;
 import org.netbeans.api.project.Project;
 import org.openide.awt.NotificationDisplayer;
+import org.openide.filesystems.FileUtil;
 import org.openide.util.ImageUtilities;
 import org.openide.util.Lookup;
 import org.openide.util.NbBundle.Messages;
@@ -32,6 +34,11 @@ import org.openide.util.lookup.Lookups;
     "MSG_LspUnreachableText=Could not reach the Godot LSP at {0}. Open the project in the Godot Editor, then reopen the .gd file.",
     "MSG_LspConnectedTitle=Godot LSP connected",
     "MSG_LspConnectedText=Connected to the Godot LSP at {0}.",
+    "MSG_LspHeadlessFailedTitle=Godot headless LSP not started",
+    "# {0} - reason",
+    "MSG_LspHeadlessFailedText=Could not start the Godot LSP in the background: {0}",
+    "# {0} - host:port",
+    "MSG_LspHeadlessUnreachableText=Could not connect to the headless Godot LSP at {0}.",
     "MSG_LspLostTitle=Godot LSP disconnected",
     "MSG_LspLostText=The connection to the Godot LSP at {0} was lost. Completion and diagnostics stop until it reconnects."
 })
@@ -74,6 +81,23 @@ public class GdscriptClient implements LanguageServerProvider {
         int port = GodotSettings.getPort();
 
         Project prj = lkp.lookup(Project.class);
+        boolean headless = GodotSettings.isHeadlessLsp() && prj != null;
+        if (headless) {
+            // Own server on loopback; host/port from the settings are for the editor mode only.
+            host = GodotSettings.DEFAULT_HOST;
+            File dir = FileUtil.toFile(prj.getProjectDirectory());
+            try {
+                if (dir == null) {
+                    throw new IOException("The project is not in a local directory");
+                }
+                port = GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), dir);
+            } catch (IOException ex) {
+                reportFailure(ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
+                        Bundle.MSG_LspHeadlessFailedText(ex.getMessage()), ex);
+                scheduleRetry(restarter);
+                return null;
+            }
+        }
         LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
                 new Object[]{prj != null ? prj.getProjectDirectory().getPath() : "<none>", host, port});
 
@@ -106,28 +130,34 @@ public class GdscriptClient implements LanguageServerProvider {
                     new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
-            String failure = host + ":" + port + " " + ex;
-            boolean first;
-            synchronized (LOCK) {
-                first = !failure.equals(lastFailure);
-                lastFailure = failure;
-                announceConnect = true;
-                connected = false;
-            }
-            // INFO once per distinct failure; details at FINE afterwards.
-            LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not reachable at " + host + ":" + port
-                    + " (is the Godot editor running with the LSP enabled?)", ex);
-            if (first) {
-                // Shown once per distinct failure; a later successful connection resets it.
-                NotificationDisplayer.getDefault().notify(
-                        Bundle.MSG_LspUnreachableTitle(),
-                        ICON,
-                        Bundle.MSG_LspUnreachableText(host + ":" + port),
-                        null,
-                        NotificationDisplayer.Priority.NORMAL);
+            String target = host + ":" + port;
+            if (headless) {
+                reportFailure(target + " " + ex, Bundle.MSG_LspHeadlessFailedTitle(),
+                        Bundle.MSG_LspHeadlessUnreachableText(target), ex);
+            } else {
+                reportFailure(target + " " + ex, Bundle.MSG_LspUnreachableTitle(),
+                        Bundle.MSG_LspUnreachableText(target), ex);
             }
             scheduleRetry(restarter);
             return null;
+        }
+    }
+
+    /**
+     * Records a failed start. INFO and a notification once per distinct failure; details at FINE afterwards.
+     * A later successful connection resets it.
+     */
+    private static void reportFailure(String failure, String title, String text, Exception ex) {
+        boolean first;
+        synchronized (LOCK) {
+            first = !failure.equals(lastFailure);
+            lastFailure = failure;
+            announceConnect = true;
+            connected = false;
+        }
+        LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not available: " + failure, ex);
+        if (first) {
+            NotificationDisplayer.getDefault().notify(title, ICON, text, null, NotificationDisplayer.Priority.NORMAL);
         }
     }
 
@@ -255,6 +285,11 @@ public class GdscriptClient implements LanguageServerProvider {
                 LOG.log(Level.INFO, "Giving up reconnecting to the Godot LSP; it will be retried when a .gd file is opened");
                 return;
             }
+        }
+        if (GodotSettings.isHeadlessLsp()) {
+            // Nothing to probe: startServer starts the headless server itself and backs off after a failure.
+            restarter.restart();
+            return;
         }
         String host = GodotSettings.getHost();
         int port = GodotSettings.getPort();
