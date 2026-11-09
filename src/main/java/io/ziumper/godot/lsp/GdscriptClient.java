@@ -7,7 +7,10 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -50,16 +53,18 @@ public class GdscriptClient implements LanguageServerProvider {
     private static final Logger LOG = Logger.getLogger(GdscriptClient.class.getName());
     private static final RequestProcessor RP = new RequestProcessor(GdscriptClient.class);
 
-    /** The single pending retry task; guarantees one retry loop at a time. Guarded by LOCK. */
+    /** The single shared retry task; one loop serves every server that waits for a retry. Guarded by LOCK. */
     private static RequestProcessor.Task retryTask;
-    /** Restarter of the most recent startServer call; the retry loop always restarts this one. Guarded by LOCK. */
-    private static ServerRestarter currentRestarter;
-    /** True while a connection made by startServer is believed alive. Guarded by LOCK. */
-    private static boolean connected;
-    /** Start of the current run of failed retries (nanoTime), 0 when none. Guarded by LOCK. */
-    private static long retryStart;
-    /** The retry loop gives up after this long without reaching the server; the next startServer re-arms it. */
+    /**
+     * Retry state per server, keyed by project (see {@link #clientKey}). Created by startServer, removed when the
+     * project is closed on purpose, when the loop gives up on it, or when its connection is closed by the client
+     * of a closed project; so it only holds projects that are open or still being retried. Guarded by LOCK.
+     */
+    private static final Map<String, RetryState> STATES = new HashMap<>();
+    /** The retry loop gives up on a server after this long without reaching it; the next startServer re-arms it. */
     private static final long RETRY_GIVE_UP_NANOS = TimeUnit.MINUTES.toNanos(10);
+    /** Key of the files that belong to no project. */
+    private static final String NO_PROJECT_KEY = "<no project>";
     /** languageId Godot's LSP server recognises. */
     static final String LANGUAGE_ID = "gdscript";
     private static final Object LOCK = new Object();
@@ -71,54 +76,98 @@ public class GdscriptClient implements LanguageServerProvider {
     /** Notifications require a non-null icon. */
     private static final Icon ICON = ImageUtilities.loadImageIcon(GodotIcons.GODOT_ICON, false);
 
-    /** Last failure message logged, so repeated identical failures do not flood messages.log. */
+    /**
+     * Last failure message logged, so repeated identical failures do not flood messages.log. Global on purpose:
+     * notifications are not per project, and in the editor mode every project fails with the same message.
+     * Guarded by LOCK.
+     */
     private static String lastFailure;
-    /** True until a connection is announced; set again after a failure or a lost connection. Guarded by LOCK. */
-    private static boolean announceConnect = true;
+
+    /** What the retry loop needs to know about one server. All fields guarded by LOCK. */
+    private static final class RetryState {
+        ServerRestarter restarter;
+        /** Project directory, null if unknown (no project or not a local directory). */
+        File dir;
+        /** The socket of the connection believed alive, null when there is none. */
+        Socket socket;
+        /** True until a connection is announced; set again after a failure or a lost connection, per server. */
+        boolean announce = true;
+        /** True while the retry loop should restart this server. */
+        boolean waiting;
+        /** Start of the current run of failures (nanoTime), 0 when none; the give-up time is counted from it. */
+        long failStart;
+    }
+
+    /** Key of the server a startServer call is for: the project directory, as in GodotLspServer. */
+    private static String clientKey(Project prj, File dir) {
+        if (prj == null) {
+            return NO_PROJECT_KEY;
+        }
+        return dir != null ? GodotLspServer.keyOf(dir) : prj.getProjectDirectory().getPath();
+    }
+
+    /**
+     * The state of the server; created when a restarter is known. Without one nothing could be retried, so a
+     * throwaway object is returned and no entry is leaked. Must be called under LOCK.
+     */
+    private static RetryState stateFor(String key, ServerRestarter restarter, File dir) {
+        RetryState s = STATES.get(key);
+        if (s == null) {
+            s = new RetryState();
+            if (restarter != null) {
+                STATES.put(key, s);
+            }
+        }
+        if (restarter != null) {
+            s.restarter = restarter;
+        }
+        if (dir != null) {
+            s.dir = dir;
+        }
+        return s;
+    }
 
     @Override
     public LanguageServerDescription startServer(Lookup lkp) {
         ServerRestarter restarter = lkp.lookup(ServerRestarter.class);
-        if (restarter != null) {
-            synchronized (LOCK) {
-                currentRestarter = restarter;
-            }
+        Project prj = lkp.lookup(Project.class);
+        File projectDir = prj != null ? FileUtil.toFile(prj.getProjectDirectory()) : null;
+        String key = clientKey(prj, projectDir);
+        synchronized (LOCK) {
+            stateFor(key, restarter, projectDir);
         }
         String host = GodotSettings.getHost();
         int port = GodotSettings.getPort();
 
-        Project prj = lkp.lookup(Project.class);
         boolean headless = GodotSettings.isHeadlessLsp() && prj != null;
         long generation = 0;
         if (headless) {
             // Own server on loopback; host/port from the settings are for the editor mode only.
             host = GodotSettings.DEFAULT_HOST;
-            File dir = FileUtil.toFile(prj.getProjectDirectory());
             try {
-                if (dir == null) {
+                if (projectDir == null) {
                     throw new IOException("The project is not in a local directory");
                 }
-                generation = GodotLspServer.generation(dir);
-                port = GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), dir);
+                generation = GodotLspServer.generation(projectDir);
+                port = GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), projectDir);
             } catch (GodotLspServer.StartRefusedException ex) {
                 // IDE exit or closed project: not a failure, and nothing to retry.
                 LOG.log(Level.FINE, "Headless Godot LSP not started: {0}", ex.getMessage());
-                rememberForReopen(dir, restarter);
+                rememberForReopen(projectDir, restarter);
                 return null;
             } catch (IOException ex) {
-                reportFailure(ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
+                reportFailure(key, ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
                         Bundle.MSG_LspHeadlessFailedText(ex.getMessage()), ex);
-                scheduleRetry(restarter);
+                scheduleRetry(key, restarter, projectDir);
                 return null;
             }
         }
         LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
                 new Object[]{prj != null ? prj.getProjectDirectory().getPath() : "<none>", host, port});
 
-        File headlessDir = headless ? FileUtil.toFile(prj.getProjectDirectory()) : null;
-        if (headlessDir != null) {
+        if (headless) {
             synchronized (LOCK) {
-                PENDING_RESTART.remove(GodotLspServer.keyOf(headlessDir)); // served again, nothing left to restart
+                PENDING_RESTART.remove(key); // served again, nothing left to restart
             }
         }
         final long startedGeneration = generation;
@@ -132,10 +181,12 @@ public class GdscriptClient implements LanguageServerProvider {
             boolean announce;
             synchronized (LOCK) {
                 lastFailure = null;
-                connected = true;
-                retryStart = 0;
-                announce = announceConnect;
-                announceConnect = false;
+                RetryState state = stateFor(key, restarter, projectDir);
+                state.socket = socket;
+                state.waiting = false;
+                state.failStart = 0;
+                announce = state.announce;
+                state.announce = false;
             }
             LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
             String target = host + ":" + port;
@@ -147,24 +198,24 @@ public class GdscriptClient implements LanguageServerProvider {
                         null,
                         NotificationDisplayer.Priority.NORMAL);
             }
-            return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target, restarter, headlessDir, startedGeneration)), out,
+            return createDescription(new GodotNotificationFilter(watchForLoss(key, socket, in, target, restarter, projectDir, headless, startedGeneration)), out,
                     new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
             String target = host + ":" + port;
-            if (headless && GodotLspServer.isStoppedIntentionally(headlessDir)) {
+            if (headless && GodotLspServer.isStoppedIntentionally(projectDir)) {
                 LOG.log(Level.FINE, "Headless Godot LSP at {0} is gone on purpose: {1}", new Object[]{target, ex});
-                rememberForReopen(headlessDir, restarter);
+                rememberForReopen(projectDir, restarter);
                 return null;
             }
             if (headless) {
-                reportFailure(target + " " + ex, Bundle.MSG_LspHeadlessFailedTitle(),
+                reportFailure(key, target + " " + ex, Bundle.MSG_LspHeadlessFailedTitle(),
                         Bundle.MSG_LspHeadlessUnreachableText(target), ex);
             } else {
-                reportFailure(target + " " + ex, Bundle.MSG_LspUnreachableTitle(),
+                reportFailure(key, target + " " + ex, Bundle.MSG_LspUnreachableTitle(),
                         Bundle.MSG_LspUnreachableText(target), ex);
             }
-            scheduleRetry(restarter);
+            scheduleRetry(key, restarter, projectDir);
             return null;
         }
     }
@@ -173,13 +224,16 @@ public class GdscriptClient implements LanguageServerProvider {
      * Records a failed start. INFO and a notification once per distinct failure; details at FINE afterwards.
      * A later successful connection resets it.
      */
-    private static void reportFailure(String failure, String title, String text, Exception ex) {
+    private static void reportFailure(String key, String failure, String title, String text, Exception ex) {
         boolean first;
         synchronized (LOCK) {
             first = !failure.equals(lastFailure);
             lastFailure = failure;
-            announceConnect = true;
-            connected = false;
+            RetryState state = STATES.get(key);
+            if (state != null) {
+                state.announce = true;
+                state.socket = null;
+            }
         }
         LOG.log(first ? Level.INFO : Level.FINE, "Godot LSP not available: " + failure, ex);
         if (first) {
@@ -193,35 +247,35 @@ public class GdscriptClient implements LanguageServerProvider {
      * After reporting, the socket is closed so SocketProcess reports the server as dead, and a reconnect is scheduled.
      * A headless server stopped on purpose (project closed, IDE exiting) is neither reported nor reconnected.
      *
-     * @param projectDir project of the headless server, null in editor mode
-     * @param generation session of the project when the connection was made; a different current one means
-     *                   the project was closed (and maybe reopened) since, so the loss is on purpose
+     * @param key        server key, see {@link #clientKey}
+     * @param projectDir project directory, null if unknown
+     * @param headless   true if the server is a headless one of the project
+     * @param generation session of the project when the connection was made (headless only); a different current
+     *                   one means the project was closed (and maybe reopened) since, so the loss is on purpose
      */
-    private static InputStream watchForLoss(Socket socket, InputStream in, String target, ServerRestarter restarter,
-            File projectDir, long generation) {
+    private static InputStream watchForLoss(String key, Socket socket, InputStream in, String target,
+            ServerRestarter restarter, File projectDir, boolean headless, long generation) {
         return new InputStream() {
             private boolean reported;
 
             private void reportIfLost() {
-                if (reported || socket.isClosed()) {
+                if (reported) {
+                    return;
+                }
+                if (socket.isClosed()) {
+                    detached(key, socket, projectDir); // closed by the client: restart, project closed or IDE exit
                     return;
                 }
                 reported = true;
-                if (projectDir != null && (GodotLspServer.isStoppedIntentionally(projectDir)
+                if (headless && (GodotLspServer.isStoppedIntentionally(projectDir)
                         || GodotLspServer.generation(projectDir) != generation)) {
-                    synchronized (LOCK) {
-                        announceConnect = true;
-                        connected = false;
-                    }
+                    connectionEnded(key, socket);
                     LOG.log(Level.FINE, "Headless Godot LSP at {0} was stopped on purpose", target);
                     closeQuietly(socket);
                     rememberForReopen(projectDir, restarter);
                     return;
                 }
-                synchronized (LOCK) {
-                    announceConnect = true;
-                    connected = false;
-                }
+                connectionEnded(key, socket);
                 LOG.log(Level.INFO, "Lost connection to Godot LSP at {0}", target);
                 NotificationDisplayer.getDefault().notify(
                         Bundle.MSG_LspLostTitle(),
@@ -231,7 +285,7 @@ public class GdscriptClient implements LanguageServerProvider {
                         NotificationDisplayer.Priority.NORMAL);
                 // Report first (the check above relies on the socket still being open), then close.
                 closeQuietly(socket);
-                scheduleRetry(restarter);
+                scheduleRetry(key, restarter, projectDir);
             }
 
             @Override
@@ -269,6 +323,34 @@ public class GdscriptClient implements LanguageServerProvider {
         };
     }
 
+    /** The connection of the server broke by itself: the next connect is announced again. */
+    private static void connectionEnded(String key, Socket socket) {
+        synchronized (LOCK) {
+            RetryState state = STATES.get(key);
+            if (state != null && state.socket == socket) {
+                state.socket = null;
+                state.announce = true;
+            }
+        }
+    }
+
+    /**
+     * The client closed the connection (restart, project closed, IDE exit). Nothing to report or retry. The state
+     * is dropped if the project is closed for good, otherwise it stays: a restart follows and reuses it, which
+     * keeps the connect announcement from repeating on every client-side restart.
+     */
+    private static void detached(String key, Socket socket, File projectDir) {
+        synchronized (LOCK) {
+            RetryState state = STATES.get(key);
+            if (state != null && state.socket == socket) {
+                state.socket = null;
+                if (projectDir != null && GodotLspServer.isStoppedIntentionally(projectDir)) {
+                    STATES.remove(key);
+                }
+            }
+        }
+    }
+
     /**
      * Godot ignores didOpen with a MIME-type languageId ("text/gdscript", the lsp.client default) and then
      * answers every completion with an empty list; it needs the plain id "gdscript". A LanguageIdResolver
@@ -289,7 +371,9 @@ public class GdscriptClient implements LanguageServerProvider {
             return;
         }
         synchronized (LOCK) {
-            PENDING_RESTART.put(GodotLspServer.keyOf(projectDir), restarter);
+            String key = GodotLspServer.keyOf(projectDir);
+            STATES.remove(key); // the pending entry takes over; the next startServer creates the state again
+            PENDING_RESTART.put(key, restarter);
         }
         if (!GodotLspServer.isStoppedIntentionally(projectDir)) {
             projectAllowed(projectDir);
@@ -312,80 +396,127 @@ public class GdscriptClient implements LanguageServerProvider {
     }
 
     /**
-     * Restarts the LSP client through the last known restarter, e.g. after the connection settings changed.
-     * Does nothing if no restarter has been seen yet (no .gd editor has started the server).
+     * Restarts the LSP client of every known server, e.g. after the connection settings changed. Servers waiting
+     * for a retry are restarted here too and leave the retry loop, so none is restarted twice; if the restart
+     * fails, startServer arms the retry again. Does nothing if no server is known (no .gd editor has started one).
      */
     public static void reconnect() {
-        ServerRestarter restarter;
+        List<ServerRestarter> restarters = new ArrayList<>();
         synchronized (LOCK) {
-            restarter = currentRestarter;
+            for (RetryState state : STATES.values()) {
+                state.waiting = false;
+                state.failStart = 0;
+                restarters.add(state.restarter);
+            }
         }
-        if (restarter != null) {
-            RP.post(restarter::restart);
+        if (!restarters.isEmpty()) {
+            RP.post(() -> restarters.forEach(ServerRestarter::restart));
         }
     }
 
-    private static void scheduleRetry(ServerRestarter restarter) {
+    /** Marks the server for the retry loop and starts the loop if it is not running. */
+    private static void scheduleRetry(String key, ServerRestarter restarter, File dir) {
         if (!GodotSettings.isAutoReconnect()) {
             return;
         }
         synchronized (LOCK) {
-            if (restarter != null) {
-                currentRestarter = restarter;
-            }
-            if (currentRestarter == null) {
+            RetryState state = stateFor(key, restarter, dir);
+            if (state.restarter == null) {
                 return;
             }
+            state.waiting = true;
             if (retryTask == null) {
                 retryTask = RP.create(GdscriptClient::retry);
             }
             if (retryTask.isFinished()) {
-                retryStart = 0;
                 retryTask.schedule(GodotSettings.getRetryIntervalMs());
             }
         }
     }
 
+    /**
+     * One pass of the shared retry loop over every waiting server. A server leaves the loop when it is
+     * restarted (startServer arms it again if that fails, so a slow headless start is never overlapped by the
+     * next pass), when its project was closed on purpose, or when it has been failing for too long. The loop
+     * reschedules itself while some server still waits for its host to come up, and ends otherwise.
+     */
     private static void retry() {
-        ServerRestarter restarter;
+        boolean headless = GodotSettings.isHeadlessLsp();
+        List<RetryState> work = new ArrayList<>();
+        Map<File, ServerRestarter> closed = new HashMap<>();
         synchronized (LOCK) {
-            restarter = currentRestarter;
-            if (restarter == null || connected) {
-                return; // somebody (e.g. lsp.client itself) already reconnected
-            }
-            if (retryStart == 0) {
-                retryStart = System.nanoTime();
-            } else if (System.nanoTime() - retryStart > RETRY_GIVE_UP_NANOS) {
-                retryStart = 0;
-                LOG.log(Level.INFO, "Giving up reconnecting to the Godot LSP; it will be retried when a .gd file is opened");
-                return;
+            boolean auto = GodotSettings.isAutoReconnect();
+            long now = System.nanoTime();
+            for (Iterator<Map.Entry<String, RetryState>> it = STATES.entrySet().iterator(); it.hasNext();) {
+                RetryState state = it.next().getValue();
+                if (!state.waiting) {
+                    continue;
+                }
+                if (!auto || state.socket != null) {
+                    state.waiting = false; // retry switched off, or somebody (e.g. lsp.client itself) reconnected
+                    continue;
+                }
+                if (state.dir != null && GodotLspServer.isStoppedIntentionally(state.dir)) {
+                    // Project closed (or IDE exiting): nothing to retry, and no entry is left behind.
+                    it.remove();
+                    if (headless && !GodotLspServer.isShuttingDown()) {
+                        closed.put(state.dir, state.restarter);
+                    }
+                    continue;
+                }
+                if (state.failStart == 0) {
+                    state.failStart = now;
+                } else if (now - state.failStart > RETRY_GIVE_UP_NANOS) {
+                    it.remove();
+                    LOG.log(Level.INFO, "Giving up reconnecting to the Godot LSP of {0}; it will be retried when a .gd file is opened",
+                            state.dir != null ? state.dir : "<no project>");
+                    continue;
+                }
+                work.add(state);
             }
         }
-        if (GodotSettings.isHeadlessLsp()) {
-            if (GodotLspServer.isShuttingDown()) {
-                return;
-            }
-            // Nothing to probe: startServer starts the headless server itself and backs off after a failure.
-            restarter.restart();
-            return;
-        }
-        String host = GodotSettings.getHost();
-        int port = GodotSettings.getPort();
-        try (Socket probe = new Socket()) {
-            probe.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
-        } catch (IOException ex) {
-            if (GodotSettings.isAutoReconnect()) {
-                synchronized (LOCK) {
-                    retryTask.schedule(GodotSettings.getRetryIntervalMs());
+        closed.forEach(GdscriptClient::rememberForReopen);
+        Boolean reachable = null;
+        for (RetryState state : work) {
+            if (!headless) {
+                if (reachable == null) {
+                    reachable = probe();
+                }
+                if (!reachable) {
+                    continue; // stays waiting
                 }
             }
-            return;
+            ServerRestarter restarter;
+            synchronized (LOCK) {
+                state.waiting = false;
+                if (!headless) {
+                    state.failStart = 0;
+                }
+                restarter = state.restarter;
+            }
+            restarter.restart();
         }
         synchronized (LOCK) {
-            retryStart = 0;
+            for (RetryState state : STATES.values()) {
+                if (state.waiting) {
+                    retryTask.schedule(GodotSettings.getRetryIntervalMs());
+                    break;
+                }
+            }
         }
-        LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting client", new Object[]{host, port});
-        restarter.restart();
+    }
+
+    /** Whether the Godot editor LSP of the settings accepts connections; one probe serves a whole pass. */
+    private static boolean probe() {
+        String host = GodotSettings.getHost();
+        int port = GodotSettings.getPort();
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
+        } catch (IOException ex) {
+            return false;
+        }
+        LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting clients", new Object[]{host, port});
+        return true;
     }
 
     private static void closeQuietly(Socket s) {

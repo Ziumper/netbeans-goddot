@@ -17,7 +17,21 @@ public final class GodotVersion {
     /** Matches a line like {@code 4.6.3.stable.official.7d41c59c4}; captures major.minor. */
     private static final Pattern VERSION_LINE = Pattern.compile("^\\s*(\\d+\\.\\d+)(?:\\.\\d+)*(?:[.\\-+].*)?$");
 
+    /** Minimum Godot version for the headless LSP: {@code --lsp-port} first appeared in Godot 4.2. */
+    public static final int HEADLESS_LSP_MIN_MAJOR = 4;
+    public static final int HEADLESS_LSP_MIN_MINOR = 2;
+
     private GodotVersion() {
+    }
+
+    /** The minimum headless-LSP version as {@code major.minor}, for messages. */
+    public static String headlessLspMinVersion() {
+        return HEADLESS_LSP_MIN_MAJOR + "." + HEADLESS_LSP_MIN_MINOR;
+    }
+
+    /** True when {@code version} is new enough for the headless LSP. Unparseable input yields false. */
+    public static boolean supportsHeadlessLsp(String version) {
+        return isAtLeast(version, HEADLESS_LSP_MIN_MAJOR, HEADLESS_LSP_MIN_MINOR);
     }
 
     /** Version of the configured executable as {@code major.minor}, or empty on any failure. Blocking; not for the EDT. */
@@ -73,6 +87,27 @@ public final class GodotVersion {
             if (p != null && p.isAlive()) {
                 p.destroyForcibly();
             }
+        }
+    }
+
+    /**
+     * True when {@code version} (as returned by {@link #detect}, or a longer string such as
+     * {@code 4.3.stable.official.77dcf97d8}) is at least {@code major.minor}. Unparseable input yields false.
+     */
+    public static boolean isAtLeast(String version, int major, int minor) {
+        if (version == null) {
+            return false;
+        }
+        Matcher m = Pattern.compile("^\\s*(\\d+)\\.(\\d+)").matcher(version);
+        if (!m.find()) {
+            return false;
+        }
+        try {
+            int ma = Integer.parseInt(m.group(1));
+            int mi = Integer.parseInt(m.group(2));
+            return ma > major || (ma == major && mi >= minor);
+        } catch (NumberFormatException ex) {
+            return false;
         }
     }
 

@@ -48,9 +48,6 @@ public final class GodotLspServer {
     private static final long RESTART_BACKOFF_MS = 30_000;
     private static final long STOP_WAIT_SECONDS = 3;
     private static final String PORT_KEY_PREFIX = "port.";
-    /** {@code --lsp-port} first appeared in Godot 4.2. */
-    private static final int MIN_MAJOR = 4;
-    private static final int MIN_MINOR = 2;
 
     /** Running server per project directory. */
     private static final Map<String, Process> RUNNING = new ConcurrentHashMap<>();
@@ -74,8 +71,12 @@ public final class GodotLspServer {
      * even if the project was reopened meanwhile.
      */
     private static final Map<String, AtomicLong> GENERATIONS = new ConcurrentHashMap<>();
-    /** Processes detached from RUNNING by close() that are still being killed; stopAll() must not miss them. */
-    private static final Set<Process> DETACHED = ConcurrentHashMap.newKeySet();
+    /**
+     * Processes detached from RUNNING by close() that are still being killed, with the key of the project they
+     * belonged to. stopAll() must not miss them, and a start of the same project waits for them (the dying
+     * process may still hold the project's port).
+     */
+    private static final Map<Process, String> DETACHED = new ConcurrentHashMap<>();
     /** Kills the processes of closed projects off the hook's thread. */
     private static final RequestProcessor RP = new RequestProcessor(GodotLspServer.class);
     /** Set once the IDE is exiting; nothing is started after that. */
@@ -191,6 +192,11 @@ public final class GodotLspServer {
         }
         if (ours == null) {
             if (isOpen(port)) {
+                // A server of this project from a just closed session may still be dying; the port is free soon.
+                // Only if it is still taken after that is it somebody else's.
+                waitForDetached(key, generation);
+            }
+            if (isOpen(port)) {
                 // Somebody else listens on our port (an editor, a leftover server): never talk to a foreign
                 // server, pick another port instead.
                 int old = port;
@@ -214,6 +220,31 @@ public final class GodotLspServer {
         return port;
     }
 
+    /**
+     * If a process of this project is still being killed after a close, waits until it is gone (at most
+     * STOP_WAIT_SECONDS + 1 s, the kill is bounded by STOP_WAIT_SECONDS). Gives up at once, like waitUntilOpen,
+     * if the project is closed again or the IDE exits.
+     *
+     * @return true if there was such a process (the caller should check the port again)
+     */
+    private static boolean waitForDetached(String key, long generation) throws IOException {
+        if (!DETACHED.containsValue(key)) {
+            return false;
+        }
+        LOG.log(Level.FINE, "Port of {0} is busy, waiting for its closing server to exit", key);
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(STOP_WAIT_SECONDS + 1);
+        while (DETACHED.containsValue(key) && System.nanoTime() < end) {
+            checkNotStopped(key, generation);
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for the closing Godot LSP", ex);
+            }
+        }
+        return true;
+    }
+
     private static void checkVersion(String exe) throws IOException {
         String version = VERSIONS.get(exe);
         if (version == null) {
@@ -222,24 +253,15 @@ public final class GodotLspServer {
             Optional<String> detected = GodotVersion.detect(exe);
             if (detected.isEmpty()) {
                 throw new IOException("Could not detect the Godot version of " + exe
-                        + " (the headless LSP needs Godot 4.2 or newer)");
+                        + " (the headless LSP needs Godot "
+                        + GodotVersion.headlessLspMinVersion() + " or newer)");
             }
             version = detected.get();
             VERSIONS.put(exe, version);
         }
-        if (!isSupported(version)) {
-            throw new IOException("Godot " + version + " is too old for the headless LSP (needs 4.2 or newer)");
-        }
-    }
-
-    private static boolean isSupported(String majorMinor) {
-        String[] parts = majorMinor.split("\\.");
-        try {
-            int major = Integer.parseInt(parts[0]);
-            int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-            return major > MIN_MAJOR || (major == MIN_MAJOR && minor >= MIN_MINOR);
-        } catch (NumberFormatException ex) {
-            return false;
+        if (!GodotVersion.supportsHeadlessLsp(version)) {
+            throw new IOException("Godot " + version + " is too old for the headless LSP (needs "
+                    + GodotVersion.headlessLspMinVersion() + " or newer)");
         }
     }
 
@@ -278,7 +300,7 @@ public final class GodotLspServer {
         FAILURES.remove(key);
         Process p = RUNNING.remove(key);
         if (p != null) {
-            DETACHED.add(p);
+            DETACHED.put(p, key);
             RP.post(() -> {
                 try {
                     LOG.log(Level.INFO, "Stopping headless Godot LSP of {0}", projectDir);
@@ -307,7 +329,7 @@ public final class GodotLspServer {
     static void stopAll() {
         SHUTTING_DOWN.set(true);
         List<Process> all = new ArrayList<>(RUNNING.values());
-        all.addAll(DETACHED);
+        all.addAll(DETACHED.keySet());
         RUNNING.clear();
         terminateAll(all);
     }
@@ -484,7 +506,7 @@ public final class GodotLspServer {
             Runtime.getRuntime().addShutdownHook(new Thread(
                     () -> {
                         List<Process> all = new ArrayList<>(RUNNING.values());
-                        all.addAll(DETACHED);
+                        all.addAll(DETACHED.keySet());
                         destroyTrees(all);
                     }, "godot-lsp-shutdown"));
         }

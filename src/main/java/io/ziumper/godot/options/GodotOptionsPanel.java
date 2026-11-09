@@ -37,7 +37,7 @@ import org.openide.util.RequestProcessor;
     "LBL_ConnectTimeout=Connect timeout (ms):",
     "LBL_AutoReconnect=Reconnect automatically",
     "LBL_HeadlessLsp=Run Godot LSP in background (headless)",
-    "TIP_HeadlessLsp=Starts a headless Godot LSP server per project instead of connecting to an open Godot Editor. Requires Godot 4.2+. Do not combine with the Godot Editor open on the same project.",
+    "TIP_HeadlessLsp=Starts a headless Godot LSP server per project instead of connecting to an open Godot Editor. Requires Godot {0}+. Do not combine with the Godot Editor open on the same project.",
     "LBL_RetryInterval=Retry interval (ms):",
     "LBL_SelectGodot=Select Godot executable",
     "MSG_ExecutableWarning=Warning: not an executable file and not found on PATH - Run and version detection won't work.",
@@ -55,7 +55,12 @@ import org.openide.util.RequestProcessor;
     "MSG_LspReachable=LSP at {0} reachable",
     "# {0} - host:port",
     "MSG_LspUnreachable=LSP at {0} not reachable (open the project in the Godot Editor)",
-    "MSG_TestInvalidInput=Fix the invalid host/port first"
+    "MSG_TestInvalidInput=Fix the invalid host/port first",
+    "# {0} - version",
+    "MSG_HeadlessSupported=Godot {0} found; headless LSP supported",
+    "# {0} - version",
+    "MSG_HeadlessTooOld=Godot {0} is too old for the headless LSP (needs {1} or newer)",
+    "MSG_HeadlessNotRunnable=Godot executable could not be run; the headless LSP needs Godot {0} or newer"
 })
 final class GodotOptionsPanel extends JPanel {
 
@@ -89,7 +94,7 @@ final class GodotOptionsPanel extends JPanel {
         ec.anchor = GridBagConstraints.WEST;
         ec.insets = new Insets(0, 4, 4, 4);
         add(executableWarning, ec);
-        headless.setToolTipText(Bundle.TIP_HeadlessLsp());
+        headless.setToolTipText(Bundle.TIP_HeadlessLsp(GodotVersion.headlessLspMinVersion()));
         GridBagConstraints hc = new GridBagConstraints();
         hc.gridx = 1;
         hc.gridy = 2;
@@ -269,6 +274,27 @@ final class GodotOptionsPanel extends JPanel {
         final String h = host.getText().trim();
         final int p = intOf(port);
         final int t = intOf(timeout);
+        if (headless.isSelected()) {
+            // Host and port are unused here: each project starts its own server, so only the Godot version matters.
+            testButton.setEnabled(false);
+            testStatus.setText(Bundle.MSG_Testing());
+            RP.post(() -> {
+                Optional<String> version = GodotVersion.detect(exe.isEmpty() ? GodotSettings.DEFAULT_GODOT_EXECUTABLE : exe);
+                String msg;
+                if (version.isEmpty()) {
+                    msg = Bundle.MSG_HeadlessNotRunnable(GodotVersion.headlessLspMinVersion());
+                } else if (!GodotVersion.supportsHeadlessLsp(version.get())) {
+                    msg = Bundle.MSG_HeadlessTooOld(version.get(), GodotVersion.headlessLspMinVersion());
+                } else {
+                    msg = Bundle.MSG_HeadlessSupported(version.get());
+                }
+                SwingUtilities.invokeLater(() -> {
+                    testStatus.setText(msg);
+                    testButton.setEnabled(true);
+                });
+            });
+            return;
+        }
         if (h.isEmpty() || p < 1 || p > 65535) {
             testStatus.setText(Bundle.MSG_TestInvalidInput());
             return;
