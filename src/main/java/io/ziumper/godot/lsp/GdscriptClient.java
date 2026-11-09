@@ -7,6 +7,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.HashMap;
+import java.util.Map;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.concurrent.TimeUnit;
@@ -61,6 +63,11 @@ public class GdscriptClient implements LanguageServerProvider {
     /** languageId Godot's LSP server recognises. */
     static final String LANGUAGE_ID = "gdscript";
     private static final Object LOCK = new Object();
+    /**
+     * Restarters of headless connections that were refused or cut because their project is closed, per project
+     * (key as in GodotLspServer). Restarted, and only these, when the project is reopened. Guarded by LOCK.
+     */
+    private static final Map<String, ServerRestarter> PENDING_RESTART = new HashMap<>();
     /** Notifications require a non-null icon. */
     private static final Icon ICON = ImageUtilities.loadImageIcon(GodotIcons.GODOT_ICON, false);
 
@@ -82,6 +89,7 @@ public class GdscriptClient implements LanguageServerProvider {
 
         Project prj = lkp.lookup(Project.class);
         boolean headless = GodotSettings.isHeadlessLsp() && prj != null;
+        long generation = 0;
         if (headless) {
             // Own server on loopback; host/port from the settings are for the editor mode only.
             host = GodotSettings.DEFAULT_HOST;
@@ -90,7 +98,13 @@ public class GdscriptClient implements LanguageServerProvider {
                 if (dir == null) {
                     throw new IOException("The project is not in a local directory");
                 }
+                generation = GodotLspServer.generation(dir);
                 port = GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), dir);
+            } catch (GodotLspServer.StartRefusedException ex) {
+                // IDE exit or closed project: not a failure, and nothing to retry.
+                LOG.log(Level.FINE, "Headless Godot LSP not started: {0}", ex.getMessage());
+                rememberForReopen(dir, restarter);
+                return null;
             } catch (IOException ex) {
                 reportFailure(ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
                         Bundle.MSG_LspHeadlessFailedText(ex.getMessage()), ex);
@@ -101,6 +115,13 @@ public class GdscriptClient implements LanguageServerProvider {
         LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
                 new Object[]{prj != null ? prj.getProjectDirectory().getPath() : "<none>", host, port});
 
+        File headlessDir = headless ? FileUtil.toFile(prj.getProjectDirectory()) : null;
+        if (headlessDir != null) {
+            synchronized (LOCK) {
+                PENDING_RESTART.remove(GodotLspServer.keyOf(headlessDir)); // served again, nothing left to restart
+            }
+        }
+        final long startedGeneration = generation;
         Socket socket = new Socket();
         try {
             socket.setTcpNoDelay(true);
@@ -126,11 +147,16 @@ public class GdscriptClient implements LanguageServerProvider {
                         null,
                         NotificationDisplayer.Priority.NORMAL);
             }
-            return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target, restarter)), out,
+            return createDescription(new GodotNotificationFilter(watchForLoss(socket, in, target, restarter, headlessDir, startedGeneration)), out,
                     new SocketProcess(socket));
         } catch (IOException ex) {
             closeQuietly(socket);
             String target = host + ":" + port;
+            if (headless && GodotLspServer.isStoppedIntentionally(headlessDir)) {
+                LOG.log(Level.FINE, "Headless Godot LSP at {0} is gone on purpose: {1}", new Object[]{target, ex});
+                rememberForReopen(headlessDir, restarter);
+                return null;
+            }
             if (headless) {
                 reportFailure(target + " " + ex, Bundle.MSG_LspHeadlessFailedTitle(),
                         Bundle.MSG_LspHeadlessUnreachableText(target), ex);
@@ -165,8 +191,14 @@ public class GdscriptClient implements LanguageServerProvider {
      * Wraps the server's input so that the server closing the connection (EOF) or breaking it (IOException)
      * is reported to the user. A close initiated by this client closes the socket first, so it is not reported.
      * After reporting, the socket is closed so SocketProcess reports the server as dead, and a reconnect is scheduled.
+     * A headless server stopped on purpose (project closed, IDE exiting) is neither reported nor reconnected.
+     *
+     * @param projectDir project of the headless server, null in editor mode
+     * @param generation session of the project when the connection was made; a different current one means
+     *                   the project was closed (and maybe reopened) since, so the loss is on purpose
      */
-    private static InputStream watchForLoss(Socket socket, InputStream in, String target, ServerRestarter restarter) {
+    private static InputStream watchForLoss(Socket socket, InputStream in, String target, ServerRestarter restarter,
+            File projectDir, long generation) {
         return new InputStream() {
             private boolean reported;
 
@@ -175,6 +207,17 @@ public class GdscriptClient implements LanguageServerProvider {
                     return;
                 }
                 reported = true;
+                if (projectDir != null && (GodotLspServer.isStoppedIntentionally(projectDir)
+                        || GodotLspServer.generation(projectDir) != generation)) {
+                    synchronized (LOCK) {
+                        announceConnect = true;
+                        connected = false;
+                    }
+                    LOG.log(Level.FINE, "Headless Godot LSP at {0} was stopped on purpose", target);
+                    closeQuietly(socket);
+                    rememberForReopen(projectDir, restarter);
+                    return;
+                }
                 synchronized (LOCK) {
                     announceConnect = true;
                     connected = false;
@@ -237,6 +280,38 @@ public class GdscriptClient implements LanguageServerProvider {
     }
 
     /**
+     * Remembers the restarter of a headless connection of a closed project, to restart it when the project is
+     * reopened (its .gd files stay open in the editor, so nothing else would reconnect them). If the project is
+     * already open again by now (the reopen came first), restarts at once.
+     */
+    private static void rememberForReopen(File projectDir, ServerRestarter restarter) {
+        if (projectDir == null || restarter == null) {
+            return;
+        }
+        synchronized (LOCK) {
+            PENDING_RESTART.put(GodotLspServer.keyOf(projectDir), restarter);
+        }
+        if (!GodotLspServer.isStoppedIntentionally(projectDir)) {
+            projectAllowed(projectDir);
+        }
+    }
+
+    /**
+     * Called from the project's open hook after the project was allowed again: restarts, off the calling
+     * thread, only the connections of that project that were refused or cut while it was closed. Does not
+     * touch other projects or a working connection.
+     */
+    public static void projectAllowed(File projectDir) {
+        ServerRestarter restarter;
+        synchronized (LOCK) {
+            restarter = PENDING_RESTART.remove(GodotLspServer.keyOf(projectDir));
+        }
+        if (restarter != null && GodotSettings.isHeadlessLsp()) {
+            RP.post(restarter::restart);
+        }
+    }
+
+    /**
      * Restarts the LSP client through the last known restarter, e.g. after the connection settings changed.
      * Does nothing if no restarter has been seen yet (no .gd editor has started the server).
      */
@@ -287,6 +362,9 @@ public class GdscriptClient implements LanguageServerProvider {
             }
         }
         if (GodotSettings.isHeadlessLsp()) {
+            if (GodotLspServer.isShuttingDown()) {
+                return;
+            }
             // Nothing to probe: startServer starts the headless server itself and backs off after a failure.
             restarter.restart();
             return;
