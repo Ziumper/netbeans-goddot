@@ -26,6 +26,12 @@ public class GodotProjectFactory implements ProjectFactory {
 
     @Override
     public Project loadProject(FileObject fo, ProjectState ps) throws IOException {
+        // ProjectManager.findProject calls loadProject on every factory without asking isProject
+        // first (FileOwnerQuery does that for each parent folder), so a non-Godot directory must
+        // yield null. Otherwise e.g. a Maven project's src/main/java turns into a Godot project.
+        if (!isProject(fo)) {
+            return null;
+        }
         return createProject(fo, ps);
     }
 

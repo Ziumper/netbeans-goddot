@@ -144,6 +144,12 @@
             <version>RELEASE280</version>
         </dependency>
         <dependency>
+            <!-- ProjectOpenedHook lives here; nbm verification needs it as a direct dependency. -->
+            <groupId>org.netbeans.api</groupId>
+            <artifactId>org-netbeans-modules-projectuiapi-base</artifactId>
+            <version>RELEASE280</version>
+        </dependency>
+        <dependency>
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-netbeans-modules-queries</artifactId>
             <version>RELEASE280</version>
@@ -167,6 +173,12 @@
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-netbeans-modules-options-api</artifactId>
             <version>RELEASE280</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.14.1</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
     <properties>
