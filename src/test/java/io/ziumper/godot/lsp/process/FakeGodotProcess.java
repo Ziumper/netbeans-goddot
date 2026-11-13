@@ -3,6 +3,7 @@ package io.ziumper.godot.lsp.process;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 
 /** Hand-driven process: tests decide whether it is alive and see what was done to it. */
@@ -14,6 +15,8 @@ final class FakeGodotProcess implements GodotProcess {
     boolean alive = true;
     /** True if {@link #destroy()} makes the process exit (a well-behaved one). */
     boolean diesOnDestroy = true;
+    /** Exit code reported once the process is dead; null if unknown. */
+    Integer exitCode;
     private final CompletableFuture<Void> exit = new CompletableFuture<>();
 
     FakeGodotProcess(long pid, String command) {
@@ -58,5 +61,10 @@ final class FakeGodotProcess implements GodotProcess {
     @Override
     public Optional<String> command() {
         return Optional.ofNullable(command);
+    }
+
+    @Override
+    public OptionalInt exitCode() {
+        return alive || exitCode == null ? OptionalInt.empty() : OptionalInt.of(exitCode);
     }
 }
