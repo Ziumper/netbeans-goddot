@@ -135,4 +135,17 @@ class ServerRegistryTest {
         assertEquals(List.of("destroy"), stubborn.calls); // no wait, so no forced kill either
         assertEquals(List.of("destroy"), f.launched(1).calls);
     }
+
+    @Test
+    void shutdownHookKeepsThePidFiles() throws IOException {
+        HeadlessServer a = started("a");
+        FakeGodotProcess p = f.launched(0);
+        p.diesOnDestroy = false; // survives SIGTERM, so nothing else may delete the file either
+        assertTrue(Files.exists(a.pidPath(6010)));
+
+        f.hooks.get(0).run();
+
+        assertEquals(List.of("destroy"), p.calls);
+        assertTrue(Files.exists(a.pidPath(6010)));
+    }
 }

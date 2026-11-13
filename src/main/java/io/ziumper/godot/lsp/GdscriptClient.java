@@ -198,26 +198,14 @@ public class GdscriptClient implements LanguageServerProvider {
             scheduleRetry(key, restarter, projectDir);
             return null;
         }
-        boolean announce;
         synchronized (LOCK) {
-            lastFailure = null;
             RetryState state = stateFor(key, restarter, projectDir);
             state.connection = connection;
             state.waiting = false;
-            state.failStart = 0;
-            announce = state.announce;
-            state.announce = false;
+            // lastFailure, failStart and announce are settled by Session.firstResponse, not by the bare TCP connect.
         }
         LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
         connection.watchFirstResponse(GodotSettings.FIRST_RESPONSE_TIMEOUT_MS);
-        if (announce) {
-            NotificationDisplayer.getDefault().notify(
-                    Bundle.MSG_LspConnectedTitle(),
-                    ICON,
-                    Bundle.MSG_LspConnectedText(target),
-                    null,
-                    NotificationDisplayer.Priority.NORMAL);
-        }
         return createDescription(new GodotNotificationFilter(connection.input()), connection.output(), connection);
     }
 
@@ -257,6 +245,26 @@ public class GdscriptClient implements LanguageServerProvider {
      */
     private record Session(String key, String target, ServerRestarter restarter, File projectDir, boolean headless,
             long generation) implements LspConnection.Listener {
+
+        @Override
+        public void firstResponse(LspConnection connection) {
+            boolean announce;
+            synchronized (LOCK) {
+                lastFailure = null;
+                RetryState state = stateFor(key, restarter, projectDir);
+                state.failStart = 0;
+                announce = state.announce;
+                state.announce = false;
+            }
+            if (announce) {
+                NotificationDisplayer.getDefault().notify(
+                        Bundle.MSG_LspConnectedTitle(),
+                        ICON,
+                        Bundle.MSG_LspConnectedText(target),
+                        null,
+                        NotificationDisplayer.Priority.NORMAL);
+            }
+        }
 
         @Override
         public void ended(LspConnection connection, LspConnection.CloseCause cause) {

@@ -9,6 +9,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -33,10 +34,14 @@ final class LspConnection extends Process {
         NO_RESPONSE
     }
 
-    /** Told once when the connection ends. */
+    /** Told once when the connection ends, and once when the server first answers. */
     @FunctionalInterface
     interface Listener {
         void ended(LspConnection connection, CloseCause cause);
+
+        /** The first byte arrived from the server; called at most once, on the reading thread. */
+        default void firstResponse(LspConnection connection) {
+        }
     }
 
     /** The two-way byte channel under the connection; a socket in production. */
@@ -57,6 +62,7 @@ final class LspConnection extends Process {
     private final Listener listener;
     private final AtomicReference<CloseCause> cause = new AtomicReference<>();
     private final InputStream input;
+    private final AtomicBoolean answered = new AtomicBoolean();
     /** For the log line of a NO_RESPONSE end. */
     private volatile long firstResponseTimeoutMs;
 
@@ -103,6 +109,14 @@ final class LspConnection extends Process {
     /** Why the connection ended; empty while it is open. */
     Optional<CloseCause> closeCause() {
         return Optional.ofNullable(cause.get());
+    }
+
+    /** Tells the listener once about the first byte, unless the connection has already ended. */
+    private void answered() {
+        watchdog.onFirstByte();
+        if (cause.get() == null && answered.compareAndSet(false, true)) {
+            listener.firstResponse(this);
+        }
     }
 
     /** Records the first cause only; closes the transport, then tells the listener (only for the first cause). */
@@ -193,7 +207,7 @@ final class LspConnection extends Process {
                 if (c < 0) {
                     end(CloseCause.LOST);
                 } else {
-                    watchdog.onFirstByte();
+                    answered();
                 }
                 return c;
             } catch (IOException ex) {
@@ -209,7 +223,7 @@ final class LspConnection extends Process {
                 if (n < 0) {
                     end(CloseCause.LOST);
                 } else if (n > 0) {
-                    watchdog.onFirstByte();
+                    answered();
                 }
                 return n;
             } catch (IOException ex) {

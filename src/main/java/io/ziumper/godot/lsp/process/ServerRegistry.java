@@ -176,7 +176,7 @@ public final class ServerRegistry {
         Map<GodotProcess, HeadlessServer> all = new LinkedHashMap<>();
         servers.values().forEach(s -> s.processes().forEach(p -> all.put(p, s)));
         ProcessTrees.destroyAll(all.keySet());
-        all.forEach((p, s) -> s.forget(p));
+        // PID files stay: a process that survives SIGTERM is then reclaimed by the stale-server policy next session.
     }
 
     /** Port assigned to the project; a free one is picked and stored on first use. */

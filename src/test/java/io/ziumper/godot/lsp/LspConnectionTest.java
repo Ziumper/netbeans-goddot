@@ -18,6 +18,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class LspConnectionTest {
@@ -25,8 +26,67 @@ class LspConnectionTest {
     private final ManualScheduler scheduler = new ManualScheduler();
     private final FakeTransport transport = new FakeTransport();
     private final List<CloseCause> ends = new ArrayList<>();
+    private final AtomicInteger answers = new AtomicInteger();
     private final LspConnection connection = new LspConnection(transport, scheduler, "127.0.0.1:6010",
-            (c, cause) -> ends.add(cause));
+            new LspConnection.Listener() {
+                @Override
+                public void ended(LspConnection c, CloseCause cause) {
+                    ends.add(cause);
+                }
+
+                @Override
+                public void firstResponse(LspConnection c) {
+                    answers.incrementAndGet();
+                }
+            });
+
+    @Test
+    void firstByteIsReportedOnceAcrossReadsAndVariants() throws IOException {
+        transport.feed("a");
+        transport.feed("b");
+        transport.feed("c");
+        connection.watchFirstResponse(30_000);
+
+        assertEquals('a', connection.input().read());
+        assertEquals(1, answers.get());
+        assertEquals(1, connection.input().read(new byte[2], 0, 2));
+        assertEquals('c', connection.input().read());
+        assertEquals(1, answers.get());
+    }
+
+    @Test
+    void firstByteViaArrayReadIsReported() throws IOException {
+        transport.feed("x");
+
+        assertEquals(1, connection.input().read(new byte[4], 0, 4));
+        assertEquals(1, answers.get());
+    }
+
+    @Test
+    void noByteAndTimeoutIsNotAResponse() {
+        connection.watchFirstResponse(30_000);
+        scheduler.fire();
+
+        assertEquals(List.of(CloseCause.NO_RESPONSE), ends);
+        assertEquals(0, answers.get());
+    }
+
+    @Test
+    void endOfStreamIsNotAResponse() throws IOException {
+        transport.endOfStream();
+
+        assertEquals(-1, connection.input().read(new byte[8], 0, 8));
+        assertEquals(0, answers.get());
+    }
+
+    @Test
+    void destroyBeforeTheFirstByteIsNotAResponse() {
+        connection.watchFirstResponse(30_000);
+        connection.destroy();
+
+        assertThrows(IOException.class, () -> connection.input().read());
+        assertEquals(0, answers.get());
+    }
 
     @Test
     void firstByteDisarmsTheWatchdog() throws IOException {
