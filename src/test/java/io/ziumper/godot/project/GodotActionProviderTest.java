@@ -92,6 +92,6 @@ class GodotActionProviderTest {
 
     @Test
     void unicodeLineSeparatorInsideCommentDoesNotSplitTheLine() throws IOException {
-        assertTrue(isMainLoop("# comment continued\nextends SceneTree\n"));
+        assertTrue(isMainLoop("# comment\u2028continued\nextends SceneTree\n"));
     }
 }
