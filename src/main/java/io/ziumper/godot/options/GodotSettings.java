@@ -27,6 +27,8 @@ public final class GodotSettings {
     public static final boolean DEFAULT_AUTO_RECONNECT = true;
     public static final int DEFAULT_RETRY_INTERVAL = 3000;
     public static final boolean DEFAULT_HEADLESS_LSP = false;
+    /** How long a new LSP connection may stay silent before it is closed and retried. Not an option. */
+    public static final long FIRST_RESPONSE_TIMEOUT_MS = 30_000;
 
     private GodotSettings() {
     }

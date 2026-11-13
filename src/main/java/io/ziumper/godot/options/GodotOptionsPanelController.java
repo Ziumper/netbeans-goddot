@@ -4,6 +4,8 @@ import java.beans.PropertyChangeListener;
 import java.beans.PropertyChangeSupport;
 import javax.swing.JComponent;
 import io.ziumper.godot.lsp.GdscriptClient;
+import io.ziumper.godot.lsp.GodotLspServer;
+import io.ziumper.godot.lsp.process.StopReason;
 import org.netbeans.spi.options.OptionsPanelController;
 import org.openide.util.HelpCtx;
 import org.openide.util.Lookup;
@@ -29,18 +31,23 @@ public final class GodotOptionsPanelController extends OptionsPanelController {
 
     @Override
     public void applyChanges() {
-        String host = GodotSettings.getHost();
-        int port = GodotSettings.getPort();
-        int timeout = GodotSettings.getConnectTimeoutMs();
-        boolean headless = GodotSettings.isHeadlessLsp();
+        SettingsChange.Values before = currentValues();
         getPanel().store();
         changed = false;
-        if (!host.equals(GodotSettings.getHost()) || port != GodotSettings.getPort()
-                || timeout != GodotSettings.getConnectTimeoutMs()
-                || headless != GodotSettings.isHeadlessLsp()) {
+        SettingsChange.Decision decision = SettingsChange.decide(before, currentValues());
+        if (decision.stopServers()) {
+            // Servers of the old mode or executable must not outlive the change.
+            GodotLspServer.stopAll(StopReason.SETTINGS_CHANGED);
+        }
+        if (decision.reconnect()) {
             // The running connection still points at the old target.
             GdscriptClient.reconnect();
         }
+    }
+
+    private static SettingsChange.Values currentValues() {
+        return new SettingsChange.Values(GodotSettings.isHeadlessLsp(), GodotSettings.getGodotExecutable(),
+                GodotSettings.getHost(), GodotSettings.getPort(), GodotSettings.getConnectTimeoutMs());
     }
 
     @Override

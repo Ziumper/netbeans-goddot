@@ -1,6 +1,8 @@
 package io.ziumper.godot.lsp;
 
 import io.ziumper.godot.GodotIcons;
+import io.ziumper.godot.lsp.process.FirstResponseWatchdog;
+import io.ziumper.godot.lsp.process.RequestProcessorScheduler;
 import io.ziumper.godot.options.GodotSettings;
 
 import java.io.File;
@@ -172,6 +174,7 @@ public class GdscriptClient implements LanguageServerProvider {
         }
         final long startedGeneration = generation;
         Socket socket = new Socket();
+        FirstResponseWatchdog watchdog = new FirstResponseWatchdog(new RequestProcessorScheduler(RP));
         try {
             socket.setTcpNoDelay(true);
             socket.setKeepAlive(true);
@@ -190,6 +193,11 @@ public class GdscriptClient implements LanguageServerProvider {
             }
             LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
             String target = host + ":" + port;
+            watchdog.arm(GodotSettings.FIRST_RESPONSE_TIMEOUT_MS, () -> {
+                LOG.log(Level.INFO, "No response from Godot LSP at {0} within {1} s; closing the connection",
+                        new Object[]{target, GodotSettings.FIRST_RESPONSE_TIMEOUT_MS / 1000});
+                closeQuietly(socket);
+            });
             if (announce) {
                 NotificationDisplayer.getDefault().notify(
                         Bundle.MSG_LspConnectedTitle(),
@@ -198,9 +206,10 @@ public class GdscriptClient implements LanguageServerProvider {
                         null,
                         NotificationDisplayer.Priority.NORMAL);
             }
-            return createDescription(new GodotNotificationFilter(watchForLoss(key, socket, in, target, restarter, projectDir, headless, startedGeneration)), out,
-                    new SocketProcess(socket));
+            return createDescription(new GodotNotificationFilter(watchForLoss(key, socket, in, target, restarter, projectDir, headless, startedGeneration, watchdog)), out,
+                    new SocketProcess(socket, watchdog));
         } catch (IOException ex) {
+            watchdog.disarm();
             closeQuietly(socket);
             String target = host + ":" + port;
             if (headless && GodotLspServer.isStoppedIntentionally(projectDir)) {
@@ -254,11 +263,13 @@ public class GdscriptClient implements LanguageServerProvider {
      *                   one means the project was closed (and maybe reopened) since, so the loss is on purpose
      */
     private static InputStream watchForLoss(String key, Socket socket, InputStream in, String target,
-            ServerRestarter restarter, File projectDir, boolean headless, long generation) {
+            ServerRestarter restarter, File projectDir, boolean headless, long generation,
+            FirstResponseWatchdog watchdog) {
         return new InputStream() {
             private boolean reported;
 
             private void reportIfLost() {
+                watchdog.disarm();
                 if (reported) {
                     return;
                 }
@@ -294,6 +305,8 @@ public class GdscriptClient implements LanguageServerProvider {
                     int c = in.read();
                     if (c < 0) {
                         reportIfLost();
+                    } else {
+                        watchdog.onFirstByte();
                     }
                     return c;
                 } catch (IOException ex) {
@@ -308,6 +321,8 @@ public class GdscriptClient implements LanguageServerProvider {
                     int n = in.read(b, off, len);
                     if (n < 0) {
                         reportIfLost();
+                    } else if (n > 0) {
+                        watchdog.onFirstByte();
                     }
                     return n;
                 } catch (IOException ex) {
@@ -534,9 +549,11 @@ public class GdscriptClient implements LanguageServerProvider {
     private static final class SocketProcess extends Process {
 
         private final Socket socket;
+        private final FirstResponseWatchdog watchdog;
 
-        SocketProcess(Socket socket) {
+        SocketProcess(Socket socket, FirstResponseWatchdog watchdog) {
             this.socket = socket;
+            this.watchdog = watchdog;
         }
 
         private boolean closed() {
@@ -594,6 +611,7 @@ public class GdscriptClient implements LanguageServerProvider {
 
         @Override
         public void destroy() {
+            watchdog.disarm();
             closeQuietly(socket);
         }
     }

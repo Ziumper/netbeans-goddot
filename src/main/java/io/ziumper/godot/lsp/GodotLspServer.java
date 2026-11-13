@@ -2,6 +2,13 @@ package io.ziumper.godot.lsp;
 
 import io.ziumper.godot.engine.GodotExecutables;
 import io.ziumper.godot.engine.GodotVersion;
+import io.ziumper.godot.lsp.process.GodotProcess;
+import io.ziumper.godot.lsp.process.HandleProcess;
+import io.ziumper.godot.lsp.process.JavaProcess;
+import io.ziumper.godot.lsp.process.PidFile;
+import io.ziumper.godot.lsp.process.ProcessTrees;
+import io.ziumper.godot.lsp.process.StaleServerPolicy;
+import io.ziumper.godot.lsp.process.StopReason;
 
 import java.io.File;
 import java.io.IOException;
@@ -9,6 +16,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -20,8 +29,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -50,13 +57,15 @@ public final class GodotLspServer {
     private static final String PORT_KEY_PREFIX = "port.";
 
     /** Running server per project directory. */
-    private static final Map<String, Process> RUNNING = new ConcurrentHashMap<>();
+    private static final Map<String, GodotProcess> RUNNING = new ConcurrentHashMap<>();
     /** One lock per project, so waiting for one project's server does not block the others. */
     private static final Map<String, Object> LOCKS = new ConcurrentHashMap<>();
     /** Last failed start per project. */
     private static final Map<String, Failure> FAILURES = new ConcurrentHashMap<>();
     /** Detected major.minor per executable; only successful detections are cached. */
     private static final Map<String, String> VERSIONS = new ConcurrentHashMap<>();
+    /** PID file written for each process we started; removed when the process is stopped. */
+    private static final Map<GodotProcess, Path> PID_FILES = new ConcurrentHashMap<>();
     /** Guards port assignment (read-modify-write of the preferences). */
     private static final Object PORT_LOCK = new Object();
     private static final AtomicBoolean HOOK_INSTALLED = new AtomicBoolean();
@@ -76,7 +85,7 @@ public final class GodotLspServer {
      * belonged to. stopAll() must not miss them, and a start of the same project waits for them (the dying
      * process may still hold the project's port).
      */
-    private static final Map<Process, String> DETACHED = new ConcurrentHashMap<>();
+    private static final Map<GodotProcess, String> DETACHED = new ConcurrentHashMap<>();
     /** Kills the processes of closed projects off the hook's thread. */
     private static final RequestProcessor RP = new RequestProcessor(GodotLspServer.class);
     /** Set once the IDE is exiting; nothing is started after that. */
@@ -185,7 +194,7 @@ public final class GodotLspServer {
         }
         checkVersion(exe);
         int port = portFor(projectDir);
-        Process ours = RUNNING.get(key);
+        GodotProcess ours = RUNNING.get(key);
         if (ours != null && !ours.isAlive()) {
             RUNNING.remove(key, ours);
             ours = null;
@@ -195,6 +204,10 @@ public final class GodotLspServer {
                 // A server of this project from a just closed session may still be dying; the port is free soon.
                 // Only if it is still taken after that is it somebody else's.
                 waitForDetached(key, generation);
+            }
+            if (isOpen(port)) {
+                // A headless server of this project left over from an earlier IDE session is ours to kill.
+                killStaleServer(projectDir, port, key, generation);
             }
             if (isOpen(port)) {
                 // Somebody else listens on our port (an editor, a leftover server): never talk to a foreign
@@ -265,16 +278,77 @@ public final class GodotLspServer {
         }
     }
 
-    private static Process start(String exe, File projectDir, int port) throws IOException {
+    /**
+     * Kills a leftover headless Godot of this project on the port, if the PID file proves it is one, and waits
+     * (at most STOP_WAIT_SECONDS) for the port to be released. Does nothing otherwise.
+     */
+    private static void killStaleServer(File projectDir, int port, String key, long generation) throws IOException {
+        Path pidPath = pidPath(projectDir, port);
+        StaleServerPolicy.Decision decision = StaleServerPolicy.decide(PidFile.read(pidPath), projectDir, port,
+                pid -> ProcessHandle.of(pid).map(HandleProcess::new));
+        if (!decision.kill()) {
+            LOG.log(Level.FINE, "Port {0} of {1} is not a stale server: {2}",
+                    new Object[]{port, projectDir, decision.reason()});
+            return;
+        }
+        GodotProcess stale = decision.process();
+        ProcessTrees.terminateAll(List.of(stale), TimeUnit.SECONDS.toNanos(STOP_WAIT_SECONDS));
+        deletePidFile(pidPath, stale.pid());
+        LOG.log(Level.INFO, "Killed stale headless Godot LSP (pid {0}) of {1} on port {2}",
+                new Object[]{stale.pid(), projectDir, port});
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(STOP_WAIT_SECONDS);
+        while (isOpen(port) && System.nanoTime() < end) {
+            checkNotStopped(key, generation);
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for the stale Godot LSP to exit", ex);
+            }
+        }
+    }
+
+    private static Path pidPath(File projectDir, int port) {
+        return PidFile.pathFor(Path.of(System.getProperty("java.io.tmpdir")), logName(projectDir), port);
+    }
+
+    /** Removes the PID file if it still belongs to the given process; failures are only logged. */
+    private static void deletePidFile(Path path, long pid) {
+        try {
+            Optional<PidFile> f = PidFile.read(path);
+            if (f.isPresent() && f.get().pid() == pid) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException | RuntimeException ex) {
+            LOG.log(Level.FINE, "Could not delete " + path, ex);
+        }
+    }
+
+    private static void forget(GodotProcess p) {
+        Path path = PID_FILES.remove(p);
+        if (path != null) {
+            deletePidFile(path, p.pid());
+        }
+    }
+
+    private static GodotProcess start(String exe, File projectDir, int port) throws IOException {
         File log = logFile(projectDir, port);
         ProcessBuilder pb = new ProcessBuilder(exe, "--headless", "--editor",
                 "--path", projectDir.getAbsolutePath(), "--lsp-port", String.valueOf(port));
         pb.redirectErrorStream(true);
         pb.redirectOutput(ProcessBuilder.Redirect.to(log));
         try {
-            Process p = pb.start();
+            GodotProcess p = new JavaProcess(pb.start());
             LOG.log(Level.INFO, "Started headless Godot LSP for {0} on port {1}, log: {2}",
                     new Object[]{projectDir, port, log});
+            Path pidPath = pidPath(projectDir, port);
+            try {
+                new PidFile(p.pid(), port, projectDir.getAbsolutePath(), System.currentTimeMillis()).write(pidPath);
+                PID_FILES.put(p, pidPath);
+                p.onExit().thenRun(() -> forget(p));
+            } catch (IOException ex) {
+                LOG.log(Level.FINE, "Could not write " + pidPath, ex);
+            }
             return p;
         } catch (IOException ex) {
             throw new IOException("Could not start " + exe + ": " + ex.getMessage(), ex);
@@ -283,8 +357,11 @@ public final class GodotLspServer {
 
     /** Log of the server of the project; overwritten on every start. */
     private static File logFile(File projectDir, int port) {
-        String name = projectDir.getName().replaceAll("[^A-Za-z0-9._-]", "_");
-        return new File(System.getProperty("java.io.tmpdir"), "godot-lsp-" + name + "-" + port + ".log");
+        return new File(System.getProperty("java.io.tmpdir"), "godot-lsp-" + logName(projectDir) + "-" + port + ".log");
+    }
+
+    private static String logName(File projectDir) {
+        return projectDir.getName().replaceAll("[^A-Za-z0-9._-]", "_");
     }
 
     /**
@@ -298,7 +375,7 @@ public final class GodotLspServer {
         STOPPED.add(key);
         counter(key).incrementAndGet();
         FAILURES.remove(key);
-        Process p = RUNNING.remove(key);
+        GodotProcess p = RUNNING.remove(key);
         if (p != null) {
             DETACHED.put(p, key);
             RP.post(() -> {
@@ -327,62 +404,55 @@ public final class GodotLspServer {
      * {@link #STOP_WAIT_SECONDS} in total, however many servers there are.
      */
     static void stopAll() {
-        SHUTTING_DOWN.set(true);
-        List<Process> all = new ArrayList<>(RUNNING.values());
-        all.addAll(DETACHED.keySet());
-        RUNNING.clear();
-        terminateAll(all);
+        stopAll(StopReason.IDE_EXIT);
     }
 
-    private static void terminate(Process p) {
+    /**
+     * IDE_EXIT: as {@link #stopAll()}, blocks and refuses any later start. SETTINGS_CHANGED: kills every server
+     * (also those being closed) without blocking, leaves the project open/closed state alone and ends the
+     * current session of the killed projects, so a start in progress notices its process is gone.
+     * PROJECT_CLOSED has no effect here; use {@link #close(File)}.
+     */
+    public static void stopAll(StopReason reason) {
+        if (reason == StopReason.IDE_EXIT) {
+            SHUTTING_DOWN.set(true);
+            List<GodotProcess> all = new ArrayList<>(RUNNING.values());
+            all.addAll(DETACHED.keySet());
+            RUNNING.clear();
+            terminateAll(all);
+        } else if (reason == StopReason.SETTINGS_CHANGED) {
+            List<GodotProcess> killed = new ArrayList<>();
+            for (Map.Entry<String, GodotProcess> e : new ArrayList<>(RUNNING.entrySet())) {
+                if (RUNNING.remove(e.getKey(), e.getValue())) {
+                    counter(e.getKey()).incrementAndGet();
+                    DETACHED.put(e.getValue(), e.getKey());
+                    killed.add(e.getValue());
+                }
+            }
+            if (!killed.isEmpty()) {
+                RP.post(() -> {
+                    try {
+                        LOG.log(Level.INFO, "Stopping {0} headless Godot LSP server(s): settings changed", killed.size());
+                        terminateAll(killed);
+                    } finally {
+                        killed.forEach(DETACHED::remove);
+                    }
+                });
+            }
+        }
+    }
+
+    private static void terminate(GodotProcess p) {
         terminateAll(List.of(p));
     }
 
-    /**
-     * Stops the processes together with all their descendants (the executable may be a wrapper script,
-     * flatpak or snap, with the real Godot as a child): SIGTERM to every tree, one shared wait, then
-     * a forced kill of whatever is still alive.
-     */
-    private static void terminateAll(Collection<Process> processes) {
-        List<ProcessHandle> handles = destroyTrees(processes);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(STOP_WAIT_SECONDS);
+    /** Stops the processes with their descendants: SIGTERM, one shared wait, then a forced kill. */
+    private static void terminateAll(Collection<GodotProcess> processes) {
         try {
-            for (ProcessHandle h : handles) {
-                long left = deadline - System.nanoTime();
-                if (left <= 0) {
-                    break;
-                }
-                try {
-                    h.onExit().get(left, TimeUnit.NANOSECONDS);
-                } catch (TimeoutException ex) {
-                    break; // the deadline is shared, so the rest has no time left either
-                } catch (ExecutionException ex) {
-                    LOG.log(Level.FINE, null, ex);
-                }
-            }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
+            ProcessTrees.terminateAll(processes, TimeUnit.SECONDS.toNanos(STOP_WAIT_SECONDS));
+        } finally {
+            processes.forEach(GodotLspServer::forget);
         }
-        for (ProcessHandle h : handles) {
-            if (h.isAlive()) {
-                h.destroyForcibly();
-            }
-        }
-    }
-
-    /**
-     * Sends SIGTERM to the processes and their descendants and returns all handles. The descendants are
-     * collected first: once the parent is gone they are reparented and can no longer be found through it.
-     */
-    private static List<ProcessHandle> destroyTrees(Collection<Process> processes) {
-        List<ProcessHandle> handles = new ArrayList<>();
-        for (Process p : processes) {
-            ProcessHandle parent = p.toHandle();
-            parent.descendants().forEach(handles::add);
-            handles.add(parent);
-        }
-        handles.forEach(ProcessHandle::destroy);
-        return handles;
     }
 
     /** Port assigned to the project; a free one is picked and stored on first use. */
@@ -470,7 +540,7 @@ public final class GodotLspServer {
     }
 
     /** Waits until the port accepts connections; fails at once, with the exit code, if our process exits first. */
-    private static void waitUntilOpen(int port, Process process, File log, String key, long generation)
+    private static void waitUntilOpen(int port, GodotProcess process, File log, String key, long generation)
             throws IOException {
         long end = System.currentTimeMillis() + READY_TIMEOUT_MS;
         while (System.currentTimeMillis() < end) {
@@ -480,7 +550,8 @@ public final class GodotLspServer {
                 throw new StartRefusedException(SHUTTING_DOWN.get() ? "IDE is shutting down" : "project closed");
             }
             if (!process.isAlive()) {
-                throw new IOException("Godot exited with code " + process.exitValue()
+                throw new IOException("Godot exited"
+                        + process.exitCode().stream().mapToObj(c -> " with code " + c).findFirst().orElse("")
                         + " before the LSP came up, see " + log);
             }
             if (isOpen(port)) {
@@ -505,9 +576,10 @@ public final class GodotLspServer {
         if (HOOK_INSTALLED.compareAndSet(false, true)) {
             Runtime.getRuntime().addShutdownHook(new Thread(
                     () -> {
-                        List<Process> all = new ArrayList<>(RUNNING.values());
+                        List<GodotProcess> all = new ArrayList<>(RUNNING.values());
                         all.addAll(DETACHED.keySet());
-                        destroyTrees(all);
+                        ProcessTrees.destroyAll(all);
+                        all.forEach(GodotLspServer::forget);
                     }, "godot-lsp-shutdown"));
         }
     }
