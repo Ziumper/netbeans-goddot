@@ -4,7 +4,6 @@ import io.ziumper.godot.engine.GodotExecutables;
 
 import io.ziumper.godot.options.GodotSettings;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -148,25 +147,42 @@ final class GodotActionProvider implements ActionProvider {
      * names SceneTree or MainLoop. Reads at most the first 64 KiB; only the head is needed.
      */
     static boolean isMainLoopScript(FileObject fo) {
-        try (BufferedReader r = new BufferedReader(new InputStreamReader(fo.getInputStream(), StandardCharsets.UTF_8))) {
-            int budget = 65536;
-            String line;
-            while ((line = r.readLine()) != null && budget > 0) {
-                budget -= line.length() + 1;
-                String t = line.strip();
-                if (t.isEmpty() || t.startsWith("#") || t.startsWith("@") || t.matches("class_name\\s+\\w+\\s*(?:#.*)?")) {
-                    // Blank, comment, annotation (@tool, @icon, ...) or lone class_name lines may precede "extends".
-                    continue;
+        final int limit = 65536;
+        char[] buf = new char[limit];
+        int len = 0;
+        boolean eof = false;
+        try (InputStreamReader r = new InputStreamReader(fo.getInputStream(), StandardCharsets.UTF_8)) {
+            while (len < limit) {
+                int n = r.read(buf, len, limit - len);
+                if (n < 0) {
+                    eof = true;
+                    break;
                 }
-                Matcher m = EXTENDS_LINE.matcher(t);
-                if (m.matches()) {
-                    return "SceneTree".equals(m.group(1)) || "MainLoop".equals(m.group(1));
-                }
-                // "extends" is not first (or is not a plain class name); stop looking.
-                return false;
+                len += n;
+            }
+            // A script of exactly the limit is complete: probe for EOF before deciding the tail may be cut.
+            if (!eof) {
+                eof = r.read() < 0;
             }
         } catch (IOException ex) {
             // unreadable: treat as not runnable
+            return false;
+        }
+        String[] lines = new String(buf, 0, len).split("\\r\\n|[\\r\\n]", -1);
+        // Buffer filled without EOF: the last line may be cut off, so do not analyse it.
+        int count = eof ? lines.length : lines.length - 1;
+        for (int i = 0; i < count; i++) {
+            String t = lines[i].strip();
+            if (t.isEmpty() || t.startsWith("#") || t.startsWith("@") || t.matches("class_name\\s+\\w+\\s*(?:#.*)?")) {
+                // Blank, comment, annotation (@tool, @icon, ...) or lone class_name lines may precede "extends".
+                continue;
+            }
+            Matcher m = EXTENDS_LINE.matcher(t);
+            if (m.matches()) {
+                return "SceneTree".equals(m.group(1)) || "MainLoop".equals(m.group(1));
+            }
+            // "extends" is not first (or is not a plain class name); stop looking.
+            return false;
         }
         return false;
     }

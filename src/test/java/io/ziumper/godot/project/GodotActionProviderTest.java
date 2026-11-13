@@ -63,4 +63,35 @@ class GodotActionProviderTest {
         assertFalse(isMainLoop(""));
         assertFalse(isMainLoop("# only a comment\n"));
     }
+
+    @Test
+    void rejectsExtendsAfterMoreThan64KiBOfComments() throws IOException {
+        String filler = "# padding padding padding padding padding padding padding\n".repeat(2000);
+        assertFalse(isMainLoop(filler + "extends SceneTree\n"));
+    }
+
+    @Test
+    void singleHugeLineWithoutNewlineIsTruncatedAndRejectedWithoutError() throws IOException {
+        // Policy: the buffer is full and its last (cut) line is discarded, so an over-long single line is false.
+        assertFalse(isMainLoop("extends SceneTree" + " ".repeat(200_000)));
+        assertFalse(isMainLoop("extends SceneTree #" + "x".repeat(200_000)));
+    }
+
+    @Test
+    void recognizesSceneTreeFollowedByMoreThan1MiBOfContent() throws IOException {
+        assertTrue(isMainLoop("extends SceneTree\n" + "var x = 1\n".repeat(120_000)));
+    }
+
+    @Test
+    void scriptOfExactly64KiBEndingWithExtendsLineIsRecognized() throws IOException {
+        String tail = "extends SceneTree";
+        String script = "#".repeat(65536 - tail.length() - 1) + "\n" + tail;
+        assertTrue(script.length() == 65536);
+        assertTrue(isMainLoop(script));
+    }
+
+    @Test
+    void unicodeLineSeparatorInsideCommentDoesNotSplitTheLine() throws IOException {
+        assertTrue(isMainLoop("# comment continued\nextends SceneTree\n"));
+    }
 }
