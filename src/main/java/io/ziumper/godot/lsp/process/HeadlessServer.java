@@ -119,8 +119,22 @@ public final class HeadlessServer {
     }
 
     /**
+     * Port of the own process if it is alive and its port answered, -1 otherwise (not started yet, still starting,
+     * stopped, project closed, IDE exiting). Never waits and takes no start lock, so unlike {@link #ensureReady} it
+     * may be called on the EDT. A -1 means a start is needed; it is not a failure.
+     */
+    public int readyPort() {
+        if (registry.isShuttingDown()) {
+            return -1;
+        }
+        synchronized (lock) {
+            return !closed && state == State.READY && process != null && process.isAlive() ? port : -1;
+        }
+    }
+
+    /**
      * Makes sure the headless LSP of the project listens on its port. Blocks for up to the ready timeout while
-     * the server starts, so it must not be called on the EDT.
+     * the server starts, so it must not be called on the EDT; use {@link #readyPort()} there.
      *
      * @param exe Godot executable to run
      * @return the port the server listens on

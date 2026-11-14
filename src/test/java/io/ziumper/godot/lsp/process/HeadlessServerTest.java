@@ -64,6 +64,40 @@ class HeadlessServerTest {
     }
 
     @Test
+    void readyPortIsKnownOnlyWhileTheOwnProcessIsUpAndNeverStartsOne() throws IOException {
+        assertEquals(-1, server.readyPort());
+        assertTrue(f.launcher.launches.isEmpty());
+
+        f.launcher.onLaunch = l -> {
+        };
+        f.ticker.onSleep = () -> {
+            assertEquals(-1, server.readyPort()); // launched, port not open yet
+            f.ports.listen(6010, f.launched(0));
+        };
+        server.ensureReady(EXE);
+        assertEquals(6010, server.readyPort());
+
+        f.launched(0).die();
+        assertEquals(-1, server.readyPort());
+        assertEquals(State.READY, server.state()); // a dead process is dropped by the next start, not here
+    }
+
+    @Test
+    void readyPortIsUnknownOnceTheProjectIsClosedOrTheIdeExits() throws IOException {
+        server.ensureReady(EXE);
+        server.close();
+        assertEquals(-1, server.readyPort());
+
+        server.allow();
+        f.scheduler.runPending();
+        server.ensureReady(EXE);
+        assertEquals(6010, server.readyPort());
+
+        f.registry.stopAll(StopReason.IDE_EXIT);
+        assertEquals(-1, server.readyPort());
+    }
+
+    @Test
     @Timeout(10)
     void parallelStartsShareOneProcess() throws Exception {
         f.launcher.onLaunch = l -> {

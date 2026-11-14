@@ -11,9 +11,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.concurrent.TimeUnit;
@@ -53,11 +55,26 @@ import org.openide.util.lookup.Lookups;
     "# {1} - seconds",
     "MSG_LspNoResponseText=The Godot LSP at {0} accepted the connection but did not answer within {1} s."
 })
-@MimeRegistration(mimeType = "text/gdscript", service = LanguageServerProvider.class)
+@MimeRegistration(mimeType = GdscriptClient.MIME_TYPE, service = LanguageServerProvider.class)
 public class GdscriptClient implements LanguageServerProvider {
 
+    static final String MIME_TYPE = "text/gdscript";
     private static final Logger LOG = Logger.getLogger(GdscriptClient.class.getName());
     private static final RequestProcessor RP = new RequestProcessor(GdscriptClient.class);
+    /**
+     * Starts headless servers and probes the Godot editor's LSP for startServer. A start waits for Godot for up to
+     * the ready timeout, so it does not share RP with the first-response watchdogs and the retry loop; projects
+     * start in parallel.
+     */
+    private static final RequestProcessor STARTER = new RequestProcessor("Godot LSP start", 4);
+    /** Keys (see {@link #clientKey}) of the servers STARTER is starting or probing, one task each. Guarded by LOCK. */
+    private static final Set<String> PENDING = new HashSet<>();
+    /**
+     * Editor-mode targets (host:port) known to accept connections: a probe or a connection succeeded and none has
+     * failed or been lost since. Only these are connected to in startServer; any other is probed first, off the
+     * caller's thread. Guarded by LOCK.
+     */
+    private static final Set<String> REACHABLE = new HashSet<>();
 
     /** The single shared retry task; one loop serves every server that waits for a retry. Guarded by LOCK. */
     private static RequestProcessor.Task retryTask;
@@ -150,23 +167,33 @@ public class GdscriptClient implements LanguageServerProvider {
         if (headless) {
             // Own server on loopback; host/port from the settings are for the editor mode only.
             host = GodotSettings.DEFAULT_HOST;
-            try {
-                if (projectDir == null) {
-                    throw new IOException("The project is not in a local directory");
-                }
-                generation = GodotLspServer.generation(projectDir);
-                port = GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), projectDir);
-            } catch (StartRefusedException ex) {
-                // IDE exit or closed project: not a failure, and nothing to retry.
-                LOG.log(Level.FINE, "Headless Godot LSP not started: {0}", ex.getMessage());
-                rememberForReopen(projectDir, restarter);
-                return null;
-            } catch (IOException ex) {
-                reportFailure(key, ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
-                        Bundle.MSG_LspHeadlessFailedText(ex.getMessage()), ex);
-                scheduleRetry(key, restarter, projectDir);
+            if (projectDir == null) {
+                String reason = "The project is not in a local directory";
+                reportFailure(key, reason, Bundle.MSG_LspHeadlessFailedTitle(),
+                        Bundle.MSG_LspHeadlessFailedText(reason), null);
+                scheduleRetry(key, restarter, null);
                 return null;
             }
+            generation = GodotLspServer.generation(projectDir);
+            if (GodotLspServer.isStoppedIntentionally(projectDir)) {
+                // IDE exit or closed project: not a failure, and nothing to retry.
+                LOG.log(Level.FINE, "Headless Godot LSP of {0} not started: project closed or IDE exiting",
+                        projectDir);
+                rememberForReopen(projectDir, restarter);
+                return null;
+            }
+            port = GodotLspServer.readyPort(projectDir);
+            if (port < 0) {
+                // lsp.client calls this on the EDT (a .gd file opened, edited or closed) and always under its
+                // global lock, and starting Godot takes seconds: start it in the background, connect afterwards.
+                startInBackground(key, prj, restarter, projectDir);
+                return null;
+            }
+        } else if (!isReachable(host + ":" + port)) {
+            // Same threads and lock: a connect to an editor that is not running blocks until the connect timeout,
+            // and even a refused loopback connect takes about 2 s on Windows. Probe first, in the background.
+            probeInBackground(key, prj, restarter, projectDir, host, port);
+            return null;
         }
         LOG.log(Level.INFO, "startServer called for Godot LSP: project={0}, target={1}:{2}",
                 new Object[]{prj != null ? prj.getProjectDirectory().getPath() : "<none>", host, port});
@@ -192,6 +219,7 @@ public class GdscriptClient implements LanguageServerProvider {
                 reportFailure(key, target + " " + ex, Bundle.MSG_LspHeadlessFailedTitle(),
                         Bundle.MSG_LspHeadlessUnreachableText(target), ex);
             } else {
+                setReachable(target, false);
                 reportFailure(key, target + " " + ex, Bundle.MSG_LspUnreachableTitle(),
                         Bundle.MSG_LspUnreachableText(target), ex);
             }
@@ -207,6 +235,105 @@ public class GdscriptClient implements LanguageServerProvider {
         LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
         connection.watchFirstResponse(GodotSettings.FIRST_RESPONSE_TIMEOUT_MS);
         return createDescription(new GodotNotificationFilter(connection.input()), connection.output(), connection);
+    }
+
+    /**
+     * Starts the project's headless server on {@link #STARTER}, one start per project at a time, and then asks
+     * lsp.client to connect; that calls startServer again, which now finds the server ready. A failed start is
+     * reported and retried like a failed connect; a refused one (project closed, IDE exiting) waits for the reopen.
+     */
+    private static void startInBackground(String key, Project prj, ServerRestarter restarter, File projectDir) {
+        if (!beginBackground(key)) {
+            return; // the start in progress connects the editors when it is done
+        }
+        LOG.log(Level.FINE, "Starting the headless Godot LSP of {0} in the background", projectDir);
+        STARTER.post(() -> {
+            boolean ready = false;
+            try {
+                GodotLspServer.ensureRunning(GodotSettings.getGodotExecutable(), projectDir);
+                ready = true;
+            } catch (StartRefusedException ex) {
+                LOG.log(Level.FINE, "Headless Godot LSP not started: {0}", ex.getMessage());
+                rememberForReopen(projectDir, restarter);
+            } catch (IOException ex) {
+                reportFailure(key, ex.getMessage(), Bundle.MSG_LspHeadlessFailedTitle(),
+                        Bundle.MSG_LspHeadlessFailedText(ex.getMessage()), ex);
+                scheduleRetry(key, restarter, projectDir);
+            } finally {
+                endBackground(key);
+            }
+            if (ready) {
+                connectNow(prj);
+            }
+        });
+    }
+
+    /**
+     * Probes the Godot editor's LSP on {@link #STARTER}, one probe per server at a time. If it listens, asks
+     * lsp.client to connect; startServer then finds the target reachable. Otherwise the failure is reported and
+     * retried like a failed connect.
+     */
+    private static void probeInBackground(String key, Project prj, ServerRestarter restarter, File dir,
+            String host, int port) {
+        if (!beginBackground(key)) {
+            return; // the probe in progress connects the editors when it is done
+        }
+        String target = host + ":" + port;
+        LOG.log(Level.FINE, "Probing the Godot LSP at {0} in the background", target);
+        STARTER.post(() -> {
+            IOException failure;
+            try {
+                failure = probe(host, port);
+            } finally {
+                endBackground(key);
+            }
+            if (failure == null) {
+                connectNow(prj);
+            } else {
+                reportFailure(key, target + " " + failure, Bundle.MSG_LspUnreachableTitle(),
+                        Bundle.MSG_LspUnreachableText(target), failure);
+                scheduleRetry(key, restarter, dir);
+            }
+        });
+    }
+
+    /** Claims the single background start or probe of the server; false if one is already running. */
+    private static boolean beginBackground(String key) {
+        synchronized (LOCK) {
+            return PENDING.add(key);
+        }
+    }
+
+    private static void endBackground(String key) {
+        synchronized (LOCK) {
+            PENDING.remove(key);
+        }
+    }
+
+    /**
+     * Asks lsp.client to connect the project's server now; it calls startServer on this thread. Files outside a
+     * project cannot be named to lsp.client this way: they connect on their next request.
+     */
+    private static void connectNow(Project prj) {
+        if (prj != null) {
+            LspClientBridge.ensureServerRunning(prj, MIME_TYPE);
+        }
+    }
+
+    private static boolean isReachable(String target) {
+        synchronized (LOCK) {
+            return REACHABLE.contains(target);
+        }
+    }
+
+    private static void setReachable(String target, boolean reachable) {
+        synchronized (LOCK) {
+            if (reachable) {
+                REACHABLE.add(target);
+            } else {
+                REACHABLE.remove(target);
+            }
+        }
     }
 
     /**
@@ -273,6 +400,9 @@ public class GdscriptClient implements LanguageServerProvider {
                 return;
             }
             connectionEnded(key, connection);
+            if (!headless) {
+                setReachable(target, false); // e.g. the editor was closed; the next start probes again first
+            }
             if (headless && (GodotLspServer.isStoppedIntentionally(projectDir)
                     || GodotLspServer.generation(projectDir) != generation)) {
                 LOG.log(Level.FINE, "Headless Godot LSP at {0} was stopped on purpose", target);
@@ -409,9 +539,10 @@ public class GdscriptClient implements LanguageServerProvider {
 
     /**
      * One pass of the shared retry loop over every waiting server. A server leaves the loop when it is
-     * restarted (startServer arms it again if that fails, so a slow headless start is never overlapped by the
-     * next pass), when its project was closed on purpose, or when it has been failing for too long. The loop
-     * reschedules itself while some server still waits for its host to come up, and ends otherwise.
+     * restarted (startServer, or the background start it began, arms it again if that fails, so a slow headless
+     * start is never overlapped by the next pass), when its project was closed on purpose, or when it has been
+     * failing for too long. The loop reschedules itself while some server still waits for its host to come up,
+     * and ends otherwise.
      */
     private static void retry() {
         boolean headless = GodotSettings.isHeadlessLsp();
@@ -453,7 +584,13 @@ public class GdscriptClient implements LanguageServerProvider {
         for (RetryState state : work) {
             if (!headless) {
                 if (reachable == null) {
-                    reachable = probe();
+                    String host = GodotSettings.getHost();
+                    int port = GodotSettings.getPort();
+                    reachable = probe(host, port) == null;
+                    if (reachable) {
+                        LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting clients",
+                                new Object[]{host, port});
+                    }
                 }
                 if (!reachable) {
                     continue; // stays waiting
@@ -479,16 +616,19 @@ public class GdscriptClient implements LanguageServerProvider {
         }
     }
 
-    /** Whether the Godot editor LSP of the settings accepts connections; one probe serves a whole pass. */
-    private static boolean probe() {
-        String host = GodotSettings.getHost();
-        int port = GodotSettings.getPort();
+    /**
+     * Whether the Godot editor LSP at host:port accepts connections: null if it does, else why not. Blocks for up
+     * to the connect timeout, so never on the EDT. The answer is recorded for startServer (see REACHABLE).
+     */
+    private static IOException probe(String host, int port) {
+        String target = host + ":" + port;
         try (Socket s = new Socket()) {
             s.connect(new InetSocketAddress(host, port), GodotSettings.getConnectTimeoutMs());
         } catch (IOException ex) {
-            return false;
+            setReachable(target, false);
+            return ex;
         }
-        LOG.log(Level.INFO, "Godot LSP reachable at {0}:{1}, restarting clients", new Object[]{host, port});
-        return true;
+        setReachable(target, true);
+        return null;
     }
 }

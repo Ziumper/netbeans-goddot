@@ -46,12 +46,18 @@ public final class GodotLspServer {
 
     /**
      * Makes sure the headless LSP of the project listens on its port; see {@link HeadlessServer#ensureReady}.
+     * Blocks while Godot starts, so never call it on the EDT or from lsp.client's startServer.
      *
      * @throws StartRefusedException if the IDE is exiting or the project was closed
      * @throws IOException with a user-presentable reason if the server could not be started
      */
     public static int ensureRunning(String exe, File projectDir) throws IOException {
         return server(projectDir).ensureReady(exe);
+    }
+
+    /** Port of the project's server if it is up, -1 if it must be started first; never blocks. */
+    public static int readyPort(File projectDir) {
+        return server(projectDir).readyPort();
     }
 
     /** Project close hook; never blocks. See {@link HeadlessServer#close()}. */
