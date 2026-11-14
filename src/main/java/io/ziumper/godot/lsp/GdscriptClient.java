@@ -234,7 +234,8 @@ public class GdscriptClient implements LanguageServerProvider {
         }
         LOG.log(Level.INFO, "Connected to Godot LSP at {0}:{1}", new Object[]{host, port});
         connection.watchFirstResponse(GodotSettings.FIRST_RESPONSE_TIMEOUT_MS);
-        return createDescription(new GodotNotificationFilter(connection.input()), connection.output(), connection);
+        return createDescription(new GodotNotificationFilter(connection.input(), DiagnosticRanges::clampToOpenDocument),
+                connection.output(), connection);
     }
 
     /**

@@ -8,6 +8,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 
 class GodotNotificationFilterTest {
@@ -108,6 +111,49 @@ class GodotNotificationFilterTest {
             }
         }
         assertEquals(frame(RESPONSE) + frame(DIAGNOSTICS), out.toString(StandardCharsets.UTF_8));
+    }
+
+    private static String rewrite(String input, UnaryOperator<byte[]> diagnostics) throws IOException {
+        try (InputStream in = new GodotNotificationFilter(new ByteArrayInputStream(bytes(input)), diagnostics)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    @Test
+    void rewrittenDiagnosticsGetTheirNewContentLength() throws IOException {
+        String fixed = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"ł\":1}}";
+        String input = "Content-Length: " + bytes(DIAGNOSTICS).length
+                + "\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n" + DIAGNOSTICS;
+
+        String output = rewrite(frame(RESPONSE) + input + frame(RESPONSE), body -> bytes(fixed));
+
+        assertEquals(frame(RESPONSE) + "Content-Length: " + bytes(fixed).length
+                + "\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n" + fixed + frame(RESPONSE),
+                output);
+    }
+
+    @Test
+    void onlyDiagnosticsAreRewritten() throws IOException {
+        String spaced = "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {}}";
+        String log = "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\",\"params\":{\"type\":3,\"message\":\"Hi\"}}";
+        List<String> seen = new ArrayList<>();
+        String input = frame(RESPONSE) + frame(log) + frame(DIAGNOSTICS) + frame(spaced);
+
+        String output = rewrite(input, body -> {
+            seen.add(new String(body, StandardCharsets.UTF_8));
+            return body;
+        });
+
+        assertEquals(input, output);
+        assertEquals(List.of(DIAGNOSTICS, spaced), seen);
+    }
+
+    @Test
+    void aFailingRewriteKeepsTheFrame() throws IOException {
+        String input = frame(DIAGNOSTICS) + frame(RESPONSE);
+        assertEquals(input, rewrite(input, body -> {
+            throw new IllegalStateException("boom");
+        }));
     }
 
     @Test

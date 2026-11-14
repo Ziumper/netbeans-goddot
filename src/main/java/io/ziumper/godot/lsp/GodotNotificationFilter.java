@@ -6,17 +6,23 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.UnaryOperator;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Server-to-client stream filter that drops Godot-specific notifications the NetBeans LSP client
  * does not understand. NetBeans would otherwise log each of them as a WARNING, and
- * {@code gdscript/capabilities} alone is ~100 KB.
+ * {@code gdscript/capabilities} alone is ~100 KB. It also hands every {@code textDocument/publishDiagnostics}
+ * body to a rewriter, which fixes the ranges lsp.client cannot handle ({@link DiagnosticRanges}).
  *
  * <p>The stream is parsed as LSP base-protocol frames ({@code Content-Length} header, blank line, body).
  * Frames are handled as raw bytes, so there is no charset issue. Anything that does not look like a
  * frame is passed through untouched.
  */
 final class GodotNotificationFilter extends InputStream {
+
+    private static final Logger LOG = Logger.getLogger(GodotNotificationFilter.class.getName());
 
     /** Notification methods that are swallowed. */
     private static final List<String> DROPPED_METHODS = List.of("gdscript/capabilities", "gdscript_client/changeWorkspace");
@@ -29,11 +35,21 @@ final class GodotNotificationFilter extends InputStream {
     private static final byte[] SEPARATOR = {'\r', '\n', '\r', '\n'};
 
     private final InputStream in;
+    private final UnaryOperator<byte[]> diagnostics;
     private byte[] pending = new byte[0];
     private int pos;
 
     GodotNotificationFilter(InputStream in) {
+        this(in, UnaryOperator.identity());
+    }
+
+    /**
+     * @param diagnostics rewrites the body of a publishDiagnostics notification; returns its argument to keep the
+     *        frame as it is. If it throws, the frame is kept as it is.
+     */
+    GodotNotificationFilter(InputStream in, UnaryOperator<byte[]> diagnostics) {
         this.in = in;
+        this.diagnostics = diagnostics;
     }
 
     @Override
@@ -98,8 +114,40 @@ final class GodotNotificationFilter extends InputStream {
             if (isDropped(body)) {
                 continue;
             }
+            if (isDiagnostics(body)) {
+                byte[] fixed = rewriteDiagnostics(body);
+                if (fixed != body) {
+                    return setPending(concat(withContentLength(head, fixed.length), fixed));
+                }
+            }
             return setPending(concat(head, body));
         }
+    }
+
+    private byte[] rewriteDiagnostics(byte[] body) {
+        try {
+            byte[] fixed = diagnostics.apply(body);
+            return fixed == null ? body : fixed;
+        } catch (RuntimeException ex) {
+            LOG.log(Level.FINE, "Could not fix the diagnostics; passed on unchanged", ex);
+            return body;
+        }
+    }
+
+    /** The header with its Content-Length replaced; other header fields are kept. */
+    private static byte[] withContentLength(byte[] head, int length) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : new String(head, StandardCharsets.ISO_8859_1).split("\r\n")) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            int colon = line.indexOf(':');
+            if (colon > 0 && line.substring(0, colon).trim().equalsIgnoreCase("Content-Length")) {
+                line = "Content-Length: " + length;
+            }
+            sb.append(line).append("\r\n");
+        }
+        return sb.append("\r\n").toString().getBytes(StandardCharsets.ISO_8859_1);
     }
 
     private boolean setPending(byte[] data) {
@@ -127,6 +175,13 @@ final class GodotNotificationFilter extends InputStream {
             }
         }
         return -1;
+    }
+
+    /** A publishDiagnostics notification; Godot writes the keys sorted, so the method comes before the params. */
+    private static boolean isDiagnostics(byte[] body) {
+        String head = new String(body, 0, Math.min(body.length, SNIFF_LIMIT), StandardCharsets.UTF_8);
+        String method = DiagnosticRanges.METHOD;
+        return head.contains("\"method\":\"" + method + "\"") || head.contains("\"method\": \"" + method + "\"");
     }
 
     private static boolean isDropped(byte[] body) {
